@@ -160,6 +160,7 @@ local function packet(localAddress,senderAddress,port,distance,message)
   reactor.rfProTick=tonumber(message.rfProTick or 0) or 0; reactor.fuelAmt=tonumber(message.fuelAmt or 0) or 0; reactor.wasteAmt=tonumber(message.wasteAmt or 0) or 0; reactor.rodCount=tonumber(message.rodCount or reactor.rodCount or 0) or 0
   if type(message.rodLevels)=="table" then reactor.rodLevels=message.rodLevels end
   autoControl()
+  sendStatus(senderAddress)
  elseif port==PORT_SERVER then
   if message.cmd=="GET_DATA" then sendStatus(senderAddress)
   elseif message.cmd=="SG_DIAL" then dialGate(message.address or message.val); sendStatus(senderAddress)
