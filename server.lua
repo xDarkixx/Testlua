@@ -30,7 +30,7 @@ local ROD_MIN,ROD_MAX,ROD_STEP=0,100,5
 local modus="AUTO"
 
 local reactor={online=false,active=false,temperature=0,casingTemp=0,energy=0,energyStored=0,energyMax=0,rods=0,rodLevels={},lastSeen=0,rfProTick=0,fuelAmt=0,wasteAmt=0,rodCount=0}
-local sg={proxy=nil,state="Offline",engaged=0,direction="",iris="UNKNOWN",irisAvailable=false,address="N/A"}
+local sg={proxy=nil,address=nil,state="Offline",engaged=0,direction="",iris="UNKNOWN",irisAvailable=false,methods={}}
 local messageLog="SYSTEM BEREIT"
 local guiDrawn=false
 
@@ -55,44 +55,86 @@ local function loadConfig()
 end
 loadConfig()
 
+-- Stargate hardware layer follows the working SGCraft2 approach:
+-- use the component address + component.invoke first, then fall back to a proxy.
+local function methodMap(address)
+ local result={}; local ok,m=pcall(component.methods,address)
+ if ok and type(m)=="table" then for name,value in pairs(m) do if value then result[name]=true end end end
+ return result
+end
 local function findStargate()
  if not component.isAvailable("stargate") then return nil end
- local ok,p=pcall(component.getPrimary,"stargate"); if ok and p then return p end
+ local ok,p=pcall(component.getPrimary,"stargate")
+ if ok and p then
+  local address=p.address or p
+  local proxy=pcall(component.proxy,address) and component.proxy(address) or p
+  return {address=address,proxy=proxy,methods=methodMap(address)}
+ end
  local list=component.list("stargate")
- if list then local addr=list(); if addr then local ok2,p2=pcall(component.proxy,addr); if ok2 then return p2 end end end
+ if list then
+  for address in list do
+   local ok2,proxy=pcall(component.proxy,address)
+   if ok2 then return {address=address,proxy=proxy,methods=methodMap(address)} end
+  end
+ end
  return nil
 end
-local function ensureSG() if not sg.proxy then sg.proxy=findStargate() end return sg.proxy end
-local function hasMethod(p,name) return p and type(p[name])=="function" end
-local function updateIrisCapability()
- local p=ensureSG()
- sg.irisAvailable=(hasMethod(p,"openIris") and hasMethod(p,"closeIris")) or (hasMethod(p,"irisOpen") and hasMethod(p,"irisClose")) or (hasMethod(p,"openIris") and hasMethod(p,"closeIris"))
- if not p then sg.irisAvailable=false end
+local function ensureSG()
+ if not sg.address then
+  local found=findStargate()
+  if found then sg.address=found.address; sg.proxy=found.proxy; sg.methods=found.methods end
+ end
+ return sg.address~=nil
 end
-local function sgcall(method,...)
- local p=ensureSG(); if not p or not hasMethod(p,method) then return false,nil end
- local ok,a,b,c=pcall(p[method],...); if not ok then setLog("SG FEHLER: "..tostring(a)); return false,nil end
- return true,{a,b,c}
+local function refreshSGMethods()
+ if not ensureSG() then return false end
+ sg.methods=methodMap(sg.address)
+ return true
+end
+local function hasMethod(name)
+ refreshSGMethods(); return sg.methods[name]==true
+end
+local function invoke(method,...)
+ if not ensureSG() then return false,nil,"NO STARGATE INTERFACE" end
+ local args={...}
+ if type(component.invoke)=="function" then
+  local ok,a,b,c=pcall(function() return component.invoke(sg.address,method,unpack(args)) end)
+  if ok and a~=nil then return true,a,b,c end
+  if not ok then return false,nil,tostring(a) end
+ end
+ if sg.proxy and type(sg.proxy[method])=="function" then
+  local ok,a,b,c=pcall(function() return sg.proxy[method](unpack(args)) end)
+  if ok and a~=nil then return true,a,b,c end
+  if not ok then return false,nil,tostring(a) end
+ end
+ return false,nil,"METHOD NOT AVAILABLE: "..method
+end
+local function updateIrisCapability()
+ if not ensureSG() then sg.irisAvailable=false; return end
+ refreshSGMethods()
+ sg.irisAvailable=(sg.methods.openIris and sg.methods.closeIris) or (sg.methods.irisOpen and sg.methods.irisClose)
 end
 local function refreshSG()
  if not ensureSG() then sg.state="Offline"; sg.engaged=0; sg.iris="N/A"; sg.irisAvailable=false; sg.address="N/A"; return end
- updateIrisCapability()
- local ok,r=sgcall("stargateState"); if ok and r then sg.state=tostring(r[1] or "Unknown"); sg.engaged=tonumber(r[2] or 0) or 0; sg.direction=tostring(r[3] or "") end
- local ok2,r2=sgcall("irisState"); if ok2 and r2 then sg.iris=tostring(r2[1] or "UNKNOWN") elseif not sg.irisAvailable then sg.iris="NICHT VERFÜGBAR" end
- local ok3,r3=sgcall("localAddress"); if ok3 and r3 then sg.address=tostring(r3[1] or "N/A") end
+ refreshSGMethods(); updateIrisCapability()
+ local ok,state,engaged,direction=invoke("stargateState")
+ if ok then sg.state=tostring(state or "Unknown"); sg.engaged=tonumber(engaged or 0) or 0; sg.direction=tostring(direction or "") end
+ local okI,irisState=invoke("irisState")
+ if okI then sg.iris=tostring(irisState or "UNKNOWN") elseif not sg.irisAvailable then sg.iris="NICHT VERFÜGBAR" end
+ local okA,localAddress=invoke("localAddress")
+ if okA then sg.localAddress=tostring(localAddress or "N/A") else sg.localAddress="N/A" end
 end
 local function sgAction(method,arg)
- local p=ensureSG(); if not p or not hasMethod(p,method) then setLog("SG: "..method.." NICHT VERFÜGBAR - IRIS/SGCraft prüfen"); return false end
- local ok,err
- if arg~=nil then ok,err=pcall(p[method],arg) else ok,err=pcall(p[method]) end
- if not ok then setLog("SG FEHLER: "..tostring(err)); return false end
+ if not ensureSG() then setLog("SG: KEIN STARGATE INTERFACE"); return false end
+ local ok,a,b=invoke(method,arg)
+ if not ok then setLog("SG: "..method.." FEHLER / "..tostring(b or a)); return false end
  return true
 end
 local function iris(open)
  updateIrisCapability()
- if not sg.irisAvailable then setLog("IRIS NICHT VERFÜGBAR: Stargate-API bietet openIris/closeIris nicht an"); return false end
+ if not sg.irisAvailable then setLog("IRIS NICHT VERFÜGBAR: SGCraft2-API bietet keine Iris-Funktion"); return false end
  local method=open and "openIris" or "closeIris"
- if not hasMethod(sg.proxy,method) then method=open and "irisOpen" or "irisClose" end
+ if not hasMethod(method) then method=open and "irisOpen" or "irisClose" end
  if sgAction(method) then sg.iris=open and "OPEN" or "CLOSED"; setLog(open and "IRIS GEÖFFNET" or "IRIS GESCHLOSSEN"); return true end
  return false
 end
@@ -130,7 +172,7 @@ local function autoControl()
  end
 end
 local function makeStatus()
- return {modus=modus,temp=reactor.temperature,casingTemp=reactor.casingTemp,rods=reactor.rods,gesamtRF=reactor.rfProTick,energyStored=reactor.energyStored,energyMax=reactor.energyMax,lastDaten={tempKern=reactor.temperature,casingTemp=reactor.casingTemp,rfProTick=reactor.rfProTick,prozent=reactor.energy,energyStored=reactor.energyStored,energyMax=reactor.energyMax,steuerstaebe=reactor.rods,fuelAmt=reactor.fuelAmt,wasteAmt=reactor.wasteAmt,rodLevels=reactor.rodLevels,rodCount=reactor.rodCount},reactorOnline=reactor.online,reactorActive=reactor.active,sgState=sg.state,sgChevrons=sg.engaged,sgIris=sg.iris,sgIrisAvailable=sg.irisAvailable,sgAddress=sg.address,sgDirection=sg.direction,log=messageLog,tempShutdownEnabled=TEMP_SHUTDOWN_ENABLED,energyShutdownEnabled=ENERGY_SHUTDOWN_ENABLED,autoStartTempEnabled=AUTO_START_TEMP_ENABLED,autoStartEnergyEnabled=AUTO_START_ENERGY_ENABLED,tempMin=TEMP_MIN,tempMax=TEMP_MAX,energyMin=ENERGY_MIN,energyMax=ENERGY_MAX}
+ return {modus=modus,temp=reactor.temperature,casingTemp=reactor.casingTemp,rods=reactor.rods,gesamtRF=reactor.rfProTick,energyStored=reactor.energyStored,energyMax=reactor.energyMax,lastDaten={tempKern=reactor.temperature,casingTemp=reactor.casingTemp,rfProTick=reactor.rfProTick,prozent=reactor.energy,energyStored=reactor.energyStored,energyMax=reactor.energyMax,steuerstaebe=reactor.rods,fuelAmt=reactor.fuelAmt,wasteAmt=reactor.wasteAmt,rodLevels=reactor.rodLevels,rodCount=reactor.rodCount},reactorOnline=reactor.online,reactorActive=reactor.active,sgState=sg.state,sgChevrons=sg.engaged,sgIris=sg.iris,sgIrisAvailable=sg.irisAvailable,sgAddress=sg.localAddress or sg.address or "N/A",sgDirection=sg.direction,log=messageLog,tempShutdownEnabled=TEMP_SHUTDOWN_ENABLED,energyShutdownEnabled=ENERGY_SHUTDOWN_ENABLED,autoStartTempEnabled=AUTO_START_TEMP_ENABLED,autoStartEnergyEnabled=AUTO_START_ENERGY_ENABLED,tempMin=TEMP_MIN,tempMax=TEMP_MAX,energyMin=ENERGY_MIN,energyMax=ENERGY_MAX}
 end
 local function sendStatus(to) if to then pcall(modem.send,to,PORT_SERVER,serialization.serialize(makeStatus())) end end
 
@@ -146,7 +188,7 @@ local function line(y,t) if not gpu or not screen then return end; local w,h=gpu
 local function refreshGUI()
  if not gpu or not screen then return end
  if not guiDrawn then drawFrame() end
- line(6,"Status:      "..(reactor.online and(reactor.active and "AKTIV" or "AUS") or "OFFLINE")); line(7,string.format("Temperatur:  %.1f C",reactor.temperature or 0)); line(8,string.format("Energy:      %.1f %%",reactor.energy or 0)); line(9,string.format("Stäbe:       %.0f %%",reactor.rods or 0)); line(12,"State:       "..sg.state); line(13,"Chevron:     "..tostring(sg.engaged)); line(14,"Iris:        "..sg.iris); line(15,"Adresse:     "..sg.address); line(24,"LOG: "..messageLog)
+ line(6,"Status:      "..(reactor.online and(reactor.active and "AKTIV" or "AUS") or "OFFLINE")); line(7,string.format("Temperatur:  %.1f C",reactor.temperature or 0)); line(8,string.format("Energy:      %.1f %%",reactor.energy or 0)); line(9,string.format("Stäbe:       %.0f %%",reactor.rods or 0)); line(12,"State:       "..sg.state); line(13,"Chevron:     "..tostring(sg.engaged)); line(14,"Iris:        "..sg.iris); line(15,"Adresse:     "..tostring(sg.localAddress or sg.address or "N/A")); line(24,"LOG: "..messageLog)
 end
 local function touch(x,y)
  if y==17 then if x<18 then iris(true) elseif x<34 then iris(false) elseif x<55 then disconnectGate() end
@@ -165,8 +207,7 @@ local function packet(localAddress,senderAddress,port,distance,message)
   reactor.energy=tonumber(message.energy or message.energyPercent or message.prozent or 0) or 0; reactor.energyStored=tonumber(message.energyStored or message.rfStored or message.energyAmount or 0) or 0; reactor.energyMax=tonumber(message.energyMax or message.rfCapacity or message.maxEnergy or 0) or 0
   reactor.rods=tonumber(message.rods or message.rodLevel or message.steuerstaebe or 0) or 0; reactor.rfProTick=tonumber(message.rfProTick or message.rf or message.rft or 0) or 0; reactor.fuelAmt=tonumber(message.fuelAmt or message.fuel or 0) or 0; reactor.wasteAmt=tonumber(message.wasteAmt or message.waste or 0) or 0; reactor.rodCount=tonumber(message.rodCount or reactor.rodCount or 0) or 0
   if type(message.rodLevels)=="table" then reactor.rodLevels=message.rodLevels end
-  autoControl()
-  pcall(modem.send,senderAddress,PORT_REACTOR,serialization.serialize({ack="REACTOR",online=true,active=reactor.active,rfProTick=reactor.rfProTick,temp=reactor.temperature,energy=reactor.energy})); sendStatus(senderAddress)
+  autoControl(); pcall(modem.send,senderAddress,PORT_REACTOR,serialization.serialize({ack="REACTOR",online=true,active=reactor.active,rfProTick=reactor.rfProTick,temp=reactor.temperature,energy=reactor.energy})); sendStatus(senderAddress)
  elseif port==PORT_SERVER then
   if message.cmd=="GET_DATA" then sendStatus(senderAddress)
   elseif message.cmd=="SG_DIAL" then dialGate(message.address or message.val); sendStatus(senderAddress)
@@ -175,9 +216,7 @@ local function packet(localAddress,senderAddress,port,distance,message)
   elseif message.cmd=="SG_DISCONNECT" then disconnectGate(); sendStatus(senderAddress)
   elseif message.cmd=="RODS_UP" then changeRods(-ROD_STEP); sendStatus(senderAddress)
   elseif message.cmd=="RODS_DOWN" then changeRods(ROD_STEP); sendStatus(senderAddress)
-  elseif message.cmd=="SET_MODUS" then
-   local requested=tostring(message.val or "AUTO"); if requested=="AUTO" or requested=="MANUELL_AN" or requested=="MANUELL_AUS" then modus=requested end
-   if modus=="MANUELL_AN" then sendReactor("AN",true) elseif modus=="MANUELL_AUS" then sendReactor("AUS",true) end; setLog("MODUS: "..modus); sendStatus(senderAddress)
+  elseif message.cmd=="SET_MODUS" then local requested=tostring(message.val or "AUTO"); if requested=="AUTO" or requested=="MANUELL_AN" or requested=="MANUELL_AUS" then modus=requested end; if modus=="MANUELL_AN" then sendReactor("AN",true) elseif modus=="MANUELL_AUS" then sendReactor("AUS",true) end; setLog("MODUS: "..modus); sendStatus(senderAddress)
   elseif message.cmd=="AUTO" then modus="AUTO"; setLog("REAKTOR: AUTO"); sendStatus(senderAddress)
   elseif message.cmd=="AN" then modus="MANUELL_AN"; sendReactor("AN",true); setLog("REAKTOR: START"); sendStatus(senderAddress)
   elseif message.cmd=="AUS" then modus="MANUELL_AUS"; sendReactor("AUS",true); setLog("REAKTOR: STOPP"); sendStatus(senderAddress)
