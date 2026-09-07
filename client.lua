@@ -39,7 +39,7 @@ local function zeichneClientStatus(verbindungsStatus, detailText)
   term.clear()
   gpu.setForeground(0x56B3FA)
   print("==================================================")
-  print("        REAKTOR-NETZWERK CLIENT v9.1             ")
+  print("        REAKTOR-NETZWERK CLIENT v9.2             ")
   print("==================================================")
   io.write(" Status: ")
   if verbindungsStatus == "ONLINE" then
@@ -77,6 +77,44 @@ local function getBool(obj, method, fallback)
   return not not value
 end
 
+local function getRodCount()
+  local count = getNumber(reactor, "getNumberOfControlRods", 1)
+  if count < 1 then count = 1 end
+  return math.floor(count)
+end
+
+local function getRodLevel(index)
+  if reactor.getControlRodLevel then
+    return getNumber(reactor, "getControlRodLevel", 0)
+  end
+  if reactor.getControlRodInsertion then
+    return getNumber(reactor, "getControlRodInsertion", 0)
+  end
+  return 0
+end
+
+local function setAllRods(level)
+  level = math.max(0, math.min(100, tonumber(level) or 0))
+  if reactor.setAllControlRodInsertion then
+    return pcall(reactor.setAllControlRodInsertion, level)
+  end
+  if reactor.setAllControlRodLevels then
+    return pcall(reactor.setAllControlRodLevels, level)
+  end
+  return false
+end
+
+local function setRod(index, level)
+  level = math.max(0, math.min(100, tonumber(level) or 0))
+  if reactor.setControlRodInsertion then
+    return pcall(reactor.setControlRodInsertion, index, level)
+  end
+  if reactor.setControlRodLevel then
+    return pcall(reactor.setControlRodLevel, index, level)
+  end
+  return false
+end
+
 zeichneClientStatus("SUCHEND", "Sende erste Datenpakete ins Netzwerk...")
 
 while true do
@@ -85,7 +123,8 @@ while true do
   if energieMax <= 0 then energieMax = 10000000 end
   local prozent = math.max(0, math.min(100, (energieAktuell / energieMax) * 100))
 
-  local aktuelleStaebe = math.floor(getNumber(reactor, "getControlRodInsertion", 0))
+  local aktuelleStaebe = math.floor(getRodLevel(0))
+  local rodCount = getRodCount()
   local fuelAmt = math.floor(getNumber(reactor, "getFuelAmount", 0))
   local wasteAmt = math.floor(getNumber(reactor, "getWasteAmount", 0))
   local maxFuel = getNumber(reactor, "getFuelAmountMax", 1000)
@@ -97,9 +136,12 @@ while true do
   local daten = {
     prozent = prozent,
     tempKern = math.floor(getNumber(reactor, "getFuelTemperature", 0)),
+    casingTemp = math.floor(getNumber(reactor, "getCasingTemperature", 0)),
     rfProTick = math.floor(getNumber(reactor, "getEnergyProducedLastTick", 0)),
     istAktiv = getBool(reactor, "getActive", false),
     steuerstaebe = aktuelleStaebe,
+    rodCount = rodCount,
+    rodLevels = {},
     fuelAmt = fuelAmt,
     wasteAmt = wasteAmt,
     fuelPct = fuelPct,
@@ -110,6 +152,10 @@ while true do
     turbineRPM = 0,
     turbineDampf = 0
   }
+
+  for i = 0, rodCount - 1 do
+    daten.rodLevels[i] = math.floor(getRodLevel(i))
+  end
 
   if component.isAvailable("br_turbine") then
     local turbine = component.getPrimary and component.getPrimary("br_turbine") or component.br_turbine
@@ -146,13 +192,17 @@ while true do
         pcall(reactor.setActive, false)
       end
 
-      if serverBefehl.rods ~= nil and reactor.setAllControlRodInsertion then
-        local rods = math.max(0, math.min(100, tonumber(serverBefehl.rods) or 0))
-        pcall(reactor.setAllControlRodInsertion, rods)
+      if type(serverBefehl.rodLevels) == "table" then
+        for i = 0, rodCount - 1 do
+          local level = serverBefehl.rodLevels[i]
+          if level ~= nil then setRod(i, level) end
+        end
+      elseif serverBefehl.rods ~= nil then
+        setAllRods(serverBefehl.rods)
       end
     end
 
-    zeichneClientStatus("ONLINE", string.format("Server aktiv | Leistung: %d RF/t", daten.rfProTick))
+    zeichneClientStatus("ONLINE", string.format("Server aktiv | %d Staebe | %d RF/t", rodCount, daten.rfProTick))
     if not getBool(reactor, "getActive", false) then
       setzeSignalAufAllenSeiten(FARBE_WEISS, 0)
     end
@@ -162,13 +212,8 @@ while true do
       if reactor.setActive and getBool(reactor, "getActive", false) then
         pcall(reactor.setActive, false)
       end
+      setzeSignalAufAllenSeiten(FARBE_ROT, 15)
       zeichneClientStatus("OFFLINE", "Watchdog-Timeout! Notabschaltung aktiv.")
-      for i = 1, 2 do
-        setzeSignalAufAllenSeiten(FARBE_ROT, 15)
-        os.sleep(0.20)
-        setzeSignalAufAllenSeiten(FARBE_ROT, 0)
-        os.sleep(0.20)
-      end
     else
       zeichneClientStatus("SUCHEND", "Keine Serverantwort - erneuter Versuch...")
     end
