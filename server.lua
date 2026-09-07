@@ -55,8 +55,8 @@ local function loadConfig()
 end
 loadConfig()
 
--- Stargate hardware layer follows the working SGCraft2 approach:
--- use the component address + component.invoke first, then fall back to a proxy.
+-- SGCraft2-compatible Stargate hardware adapter.
+-- The GUI is untouched: only discovery/invocation is handled here.
 local function methodMap(address)
  local result={}; local ok,m=pcall(component.methods,address)
  if ok and type(m)=="table" then for name,value in pairs(m) do if value then result[name]=true end end end
@@ -67,7 +67,8 @@ local function findStargate()
  local ok,p=pcall(component.getPrimary,"stargate")
  if ok and p then
   local address=p.address or p
-  local proxy=pcall(component.proxy,address) and component.proxy(address) or p
+  local okProxy,proxy=pcall(component.proxy,address)
+  if not okProxy then proxy=p end
   return {address=address,proxy=proxy,methods=methodMap(address)}
  end
  local list=component.list("stargate")
@@ -115,7 +116,7 @@ local function updateIrisCapability()
  sg.irisAvailable=(sg.methods.openIris and sg.methods.closeIris) or (sg.methods.irisOpen and sg.methods.irisClose)
 end
 local function refreshSG()
- if not ensureSG() then sg.state="Offline"; sg.engaged=0; sg.iris="N/A"; sg.irisAvailable=false; sg.address="N/A"; return end
+ if not ensureSG() then sg.state="Offline"; sg.engaged=0; sg.iris="N/A"; sg.irisAvailable=false; sg.localAddress=nil; return end
  refreshSGMethods(); updateIrisCapability()
  local ok,state,engaged,direction=invoke("stargateState")
  if ok then sg.state=tostring(state or "Unknown"); sg.engaged=tonumber(engaged or 0) or 0; sg.direction=tostring(direction or "") end
@@ -132,15 +133,17 @@ local function sgAction(method,arg)
 end
 local function iris(open)
  updateIrisCapability()
- if not sg.irisAvailable then setLog("IRIS NICHT VERFÜGBAR: SGCraft2-API bietet keine Iris-Funktion"); return false end
- local method=open and "openIris" or "closeIris"
- if not hasMethod(method) then method=open and "irisOpen" or "irisClose" end
+ if not sg.irisAvailable then setLog("IRIS NICHT VERFÜGBAR / KEINE SGCraft-Iris-API"); return false end
+ local method
+ if open then method=hasMethod("openIris") and "openIris" or "irisOpen" else method=hasMethod("closeIris") and "closeIris" or "irisClose" end
  if sgAction(method) then sg.iris=open and "OPEN" or "CLOSED"; setLog(open and "IRIS GEÖFFNET" or "IRIS GESCHLOSSEN"); return true end
  return false
 end
 local function dialGate(addr)
- addr=tostring(addr or ""); if addr=="" then setLog("SG: KEINE ADRESSE"); return end
- if sgAction("dial",addr) then setLog("SG: WÄHLE "..addr) end
+ addr=tostring(addr or ""):gsub("[^0-9A-Za-z]",""):upper()
+ if #addr~=7 and #addr~=9 then setLog("SG: ADRESSE MUSS 7 ODER 9 SYMBOLE HABEN"); return false end
+ if sgAction("dial",addr) then setLog("SG: WÄHLE "..addr); return true end
+ return false
 end
 local function disconnectGate() if sgAction("disconnect") then setLog("SG: VERBINDUNG GETRENNT") end end
 
@@ -159,16 +162,22 @@ local function setRods(level) level=math.max(ROD_MIN,math.min(ROD_MAX,tonumber(l
 local function changeRods(delta) setRods(averageRods()+delta); setLog(string.format("STÄBE: %.0f %%",reactor.rods)) end
 local function autoControl()
  if modus~="AUTO" or not reactor.online then return end
- if TEMP_SHUTDOWN_ENABLED and reactor.temperature>=TEMP_MAX then setRods(ROD_MAX); sendReactor("AUS",true); setLog("AUTO: TEMPERATUR-LIMIT - AUS"); return end
- if ENERGY_SHUTDOWN_ENABLED and reactor.energy>=ENERGY_MAX then setRods(ROD_MAX); sendReactor("AUS",true); setLog("AUTO: ENERGIE-LIMIT - AUS"); return end
+ if TEMP_SHUTDOWN_ENABLED and reactor.temperature>=TEMP_MAX then
+  if reactor.active then setRods(ROD_MAX); sendReactor("AUS",true); setLog("AUTO: TEMPERATUR-LIMIT - AUS") end
+  return
+ end
+ if ENERGY_SHUTDOWN_ENABLED and reactor.energy>=ENERGY_MAX then
+  if reactor.active then setRods(ROD_MAX); sendReactor("AUS",true); setLog("AUTO: ENERGIE-LIMIT - AUS") end
+  return
+ end
  local tempOK=(not TEMP_SHUTDOWN_ENABLED) or reactor.temperature<=TEMP_MIN
  local energyOK=(not ENERGY_SHUTDOWN_ENABLED) or reactor.energy<=ENERGY_MIN
  local startAllowed=true
  if AUTO_START_TEMP_ENABLED and TEMP_SHUTDOWN_ENABLED and not tempOK then startAllowed=false end
  if AUTO_START_ENERGY_ENABLED and ENERGY_SHUTDOWN_ENABLED and not energyOK then startAllowed=false end
- if startAllowed and (AUTO_START_TEMP_ENABLED or AUTO_START_ENERGY_ENABLED) then
-  local trigger=(AUTO_START_TEMP_ENABLED and TEMP_SHUTDOWN_ENABLED and reactor.temperature<=TEMP_MIN) or (AUTO_START_ENERGY_ENABLED and ENERGY_SHUTDOWN_ENABLED and reactor.energy<=ENERGY_MIN)
-  if trigger then setRods(ROD_MIN); sendReactor("AN",true); setLog("AUTO: START-LIMIT ERREICHT") end
+ local trigger=(AUTO_START_TEMP_ENABLED and TEMP_SHUTDOWN_ENABLED and reactor.temperature<=TEMP_MIN) or (AUTO_START_ENERGY_ENABLED and ENERGY_SHUTDOWN_ENABLED and reactor.energy<=ENERGY_MIN)
+ if startAllowed and trigger and not reactor.active then
+  setRods(ROD_MIN); sendReactor("AN",true); setLog("AUTO: START FREIGEGEBEN")
  end
 end
 local function makeStatus()
@@ -205,35 +214,34 @@ local function packet(localAddress,senderAddress,port,distance,message)
   reactor.online=true; reactor.lastSeen=computer.uptime(); reactor.active=message.active==true or message.active==1 or message.istAktiv==true
   reactor.temperature=tonumber(message.temperature or message.temp or message.tempKern or 0) or 0; reactor.casingTemp=tonumber(message.casingTemp or message.tempCasing or message.gehaeuseTemp or 0) or 0
   reactor.energy=tonumber(message.energy or message.energyPercent or message.prozent or 0) or 0; reactor.energyStored=tonumber(message.energyStored or message.rfStored or message.energyAmount or 0) or 0; reactor.energyMax=tonumber(message.energyMax or message.rfCapacity or message.maxEnergy or 0) or 0
-  reactor.rods=tonumber(message.rods or message.rodLevel or message.steuerstaebe or 0) or 0; reactor.rfProTick=tonumber(message.rfProTick or message.rf or message.rft or 0) or 0; reactor.fuelAmt=tonumber(message.fuelAmt or message.fuel or 0) or 0; reactor.wasteAmt=tonumber(message.wasteAmt or message.waste or 0) or 0; reactor.rodCount=tonumber(message.rodCount or reactor.rodCount or 0) or 0
+  reactor.rods=tonumber(message.rods or message.rodLevel or message.steuerstaebe or 0) or 0; reactor.rfProTick=tonumber(message.rfProTick or message.rf or message.rfPerTick or 0) or 0
+  reactor.fuelAmt=tonumber(message.fuelAmt or message.fuel or 0) or 0; reactor.wasteAmt=tonumber(message.wasteAmt or message.waste or 0) or 0; reactor.rodCount=tonumber(message.rodCount or message.steuerstabAnzahl or 0) or 0
   if type(message.rodLevels)=="table" then reactor.rodLevels=message.rodLevels end
-  autoControl(); pcall(modem.send,senderAddress,PORT_REACTOR,serialization.serialize({ack="REACTOR",online=true,active=reactor.active,rfProTick=reactor.rfProTick,temp=reactor.temperature,energy=reactor.energy})); sendStatus(senderAddress)
+  autoControl(); sendStatus(senderAddress)
  elseif port==PORT_SERVER then
-  if message.cmd=="GET_DATA" then sendStatus(senderAddress)
-  elseif message.cmd=="SG_DIAL" then dialGate(message.address or message.val); sendStatus(senderAddress)
-  elseif message.cmd=="SG_IRIS_OPEN" then iris(true); sendStatus(senderAddress)
-  elseif message.cmd=="SG_IRIS_CLOSE" then iris(false); sendStatus(senderAddress)
-  elseif message.cmd=="SG_DISCONNECT" then disconnectGate(); sendStatus(senderAddress)
-  elseif message.cmd=="RODS_UP" then changeRods(-ROD_STEP); sendStatus(senderAddress)
-  elseif message.cmd=="RODS_DOWN" then changeRods(ROD_STEP); sendStatus(senderAddress)
-  elseif message.cmd=="SET_MODUS" then local requested=tostring(message.val or "AUTO"); if requested=="AUTO" or requested=="MANUELL_AN" or requested=="MANUELL_AUS" then modus=requested end; if modus=="MANUELL_AN" then sendReactor("AN",true) elseif modus=="MANUELL_AUS" then sendReactor("AUS",true) end; setLog("MODUS: "..modus); sendStatus(senderAddress)
-  elseif message.cmd=="AUTO" then modus="AUTO"; setLog("REAKTOR: AUTO"); sendStatus(senderAddress)
-  elseif message.cmd=="AN" then modus="MANUELL_AN"; sendReactor("AN",true); setLog("REAKTOR: START"); sendStatus(senderAddress)
-  elseif message.cmd=="AUS" then modus="MANUELL_AUS"; sendReactor("AUS",true); setLog("REAKTOR: STOPP"); sendStatus(senderAddress)
+  if message.cmd=="GET_DATA" then refreshSG(); sendStatus(senderAddress)
+  elseif message.cmd=="DIAL" or message.cmd=="DIAL_GATE" then dialGate(message.address or message.addr or message.val)
+  elseif message.cmd=="DISCONNECT" then disconnectGate()
+  elseif message.cmd=="IRIS_OPEN" then iris(true)
+  elseif message.cmd=="IRIS_CLOSE" then iris(false)
+  elseif message.cmd=="IRIS" then iris(message.open==true or message.value==true or message.val==true)
+  elseif message.cmd=="RODS" then setRods(message.rods or message.value)
+  elseif message.cmd=="AN" or message.cmd=="START" then modus="MANUELL_AN"; sendReactor("AN",true); setLog("REAKTOR: START")
+  elseif message.cmd=="AUS" or message.cmd=="STOP" then modus="MANUELL_AUS"; sendReactor("AUS",true); setLog("REAKTOR: STOPP")
   elseif message.cmd=="SET_SAFETY" then
-   if message.tempEnabled~=nil then TEMP_SHUTDOWN_ENABLED=message.tempEnabled==true end; if message.energyEnabled~=nil then ENERGY_SHUTDOWN_ENABLED=message.energyEnabled==true end
-   if message.tempStartEnabled~=nil then AUTO_START_TEMP_ENABLED=message.tempStartEnabled==true end; if message.energyStartEnabled~=nil then AUTO_START_ENERGY_ENABLED=message.energyStartEnabled==true end
-   if message.tempMin~=nil then TEMP_MIN=tonumber(message.tempMin) or TEMP_MIN end; if message.tempMax~=nil then TEMP_MAX=tonumber(message.tempMax) or TEMP_MAX end; if message.energyMin~=nil then ENERGY_MIN=tonumber(message.energyMin) or ENERGY_MIN end; if message.energyMax~=nil then ENERGY_MAX=tonumber(message.energyMax) or ENERGY_MAX end
-   saveConfig(); setLog("SICHERHEITSEINSTELLUNGEN GESPEICHERT"); sendStatus(senderAddress)
+   TEMP_SHUTDOWN_ENABLED=message.tempEnabled~=false; ENERGY_SHUTDOWN_ENABLED=message.energyEnabled~=false; AUTO_START_TEMP_ENABLED=message.tempStartEnabled==true; AUTO_START_ENERGY_ENABLED=message.energyStartEnabled==true
+   TEMP_MIN=tonumber(message.tempMin) or TEMP_MIN; TEMP_MAX=tonumber(message.tempMax) or TEMP_MAX; ENERGY_MIN=tonumber(message.energyMin) or ENERGY_MIN; ENERGY_MAX=tonumber(message.energyMax) or ENERGY_MAX; saveConfig(); setLog("SICHERHEIT GESPEICHERT")
   end
+  refreshSG(); sendStatus(senderAddress)
  end
 end
 
-if gpu and screen then drawFrame() end
-refreshSG(); refreshGUI()
-local last=0
+if gpu and screen then drawFrame(); refreshSG(); refreshGUI() end
 while true do
- local ev,a,b,c,d,e=event.pullMultiple(0.5,"modem_message","touch")
- if ev=="modem_message" then packet(a,b,c,d,e) elseif ev=="touch" then touch(tonumber(b) or 0,tonumber(c) or 0) end
- local now=computer.uptime(); if now-last>1 then last=now; refreshSG(); if reactor.online and now-reactor.lastSeen>4 then reactor.online=false end; autoControl(); refreshGUI() end
+ local e={event.pull(1)}
+ if e[1]=="modem_message" then packet(e[2],e[3],e[4],e[5],e[6]); refreshGUI()
+ elseif e[1]=="touch" then touch(e[3],e[4])
+ elseif e[1]=="interrupted" then break end
+ if computer.uptime()-reactor.lastSeen>6 then reactor.online=false; reactor.active=false end
+ refreshSG(); refreshGUI()
 end
