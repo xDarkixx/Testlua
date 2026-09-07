@@ -27,149 +27,108 @@ local serverAddress = nil
 local currentDir = shell.getWorkingDirectory() or "/"
 local ADDRESS_FILE = fs.concat(currentDir, "sgc_adressbuch.dat")
 
-local ringWinkel = 0
-local drehRichtung = 1
-local letztesChevron = 0
-local animFrame = 0
-local kawooshFrame = 0
+local ringWinkel, drehRichtung, letztesChevron = 0, 1, 0
+local animFrame, kawooshFrame = 0, 0
 local sgcStatusText = "SGC DIALING SYSTEM READY"
 
-local C_BG          = 0x05070A
-local C_PANEL       = 0x0E121A
-local C_BORDER      = 0x1A2332
-local C_TEXT        = 0xECF0F1
-local C_TEXT_MUTED  = 0x4A5868
-local C_GRUEN       = 0x2ECC71
-local C_GELB        = 0xF1C40F
-local C_ROT         = 0xE74C3C
-local C_CYAN        = 0x00E5FF
-local C_LILA        = 0x9B59B6
-local C_RING_METALL = 0x546E7A
-local C_CHEV_OFF    = 0x1C2B38
-local C_CHEV_LOCK   = 0xFF9800
-local C_CHEV_ON     = 0xFF3D00
-local C_KAWOOSH     = 0x00B0FF
+local C_BG=0x05070A
+local C_PANEL=0x0E121A
+local C_BORDER=0x1A2332
+local C_TEXT=0xECF0F1
+local C_TEXT_MUTED=0x4A5868
+local C_GRUEN=0x2ECC71
+local C_GELB=0xF1C40F
+local C_ROT=0xE74C3C
+local C_CYAN=0x00E5FF
+local C_LILA=0x9B59B6
+local C_RING_METALL=0x546E7A
+local C_CHEV_OFF=0x1C2B38
+local C_CHEV_LOCK=0xFF9800
+local C_CHEV_ON=0xFF3D00
+local C_KAWOOSH=0x00B0FF
 
-local GLYPH_CODES = {
-  [1]="EARTH",[2]="CRATER",[3]="VIRGO",[4]="BOOTES",[5]="CENTAUR",[6]="LIBRA",[7]="SERPENS",[8]="SCORPIO",[9]="CORONA",[10]="LUPUS",
-  [11]="NORMA",[12]="OPHIUCH",[13]="SAGITT",[14]="COR.AUS",[15]="SCUTUM",[16]="CAPRIC",[17]="MICROS",[18]="SCULPT",[19]="PISC.A",[20]="AQUAR.",
-  [21]="PEGASUS",[22]="EQUUL.",[23]="ARIES",[24]="CETUS",[25]="PISCES",[26]="ANDROM",[27]="TRIANG",[28]="TAURUS",[29]="PERSEU",[30]="AURIGA",
-  [31]="ERIDAN",[32]="ORION",[33]="MONOC.",[34]="GEMINI",[35]="CAN.MAJ",[36]="PUPPIS",[37]="CANCER",[38]="HYDRA",[39]="LYNX"
-}
+local GLYPH_CODES={[1]="EARTH",[2]="CRATER",[3]="VIRGO",[4]="BOOTES",[5]="CENTAUR",[6]="LIBRA",[7]="SERPENS",[8]="SCORPIO",[9]="CORONA",[10]="LUPUS",[11]="NORMA",[12]="OPHIUCH",[13]="SAGITT",[14]="COR.AUS",[15]="SCUTUM",[16]="CAPRIC",[17]="MICROS",[18]="SCULPT",[19]="PISC.A",[20]="AQUAR.",[21]="PEGASUS",[22]="EQUUL.",[23]="ARIES",[24]="CETUS",[25]="PISCES",[26]="ANDROM",[27]="TRIANG",[28]="TAURUS",[29]="PERSEU",[30]="AURIGA",[31]="ERIDAN",[32]="ORION",[33]="MONOC.",[34]="GEMINI",[35]="CAN.MAJ",[36]="PUPPIS",[37]="CANCER",[38]="HYDRA",[39]="LYNX"}
+local ACTIVE_DIAL_SEQUENCE={28,3,32,5,12,18,1}
 
-local ACTIVE_DIAL_SEQUENCE = {28,3,32,5,12,18,1}
-
-local ADRESSBUCH = {
+local ADRESSBUCH={
   {name="P3X-982 (ERDE ALPHA)",addr="SGCBASE",glyphen="TAURUS / VIRGO / ORION / EARTH"},
   {name="ABYDOS REBELLEN-AUSSENPOSTEN",addr="ABYDOSX",glyphen="CRATER / SERPENS / ARIES / EARTH"},
   {name="ATLANTIS KONTROLL-RAUM",addr="ATLANTN",glyphen="PEGASUS / ANDROMEDA / CETUS / EARTH"}
 }
 
 local function saveAddresses()
-  local f = io.open(ADDRESS_FILE, "w")
+  local f=io.open(ADDRESS_FILE,"w")
   if not f then return false end
-  local ok = pcall(function()
-    f:write(serialization.serialize(ADRESSBUCH))
-    f:close()
-  end)
+  local ok=pcall(function() f:write(serialization.serialize(ADRESSBUCH)); f:close() end)
   return ok
 end
 
 local function loadAddresses()
   if not fs.exists(ADDRESS_FILE) then return end
-  local f = io.open(ADDRESS_FILE, "r")
+  local f=io.open(ADDRESS_FILE,"r")
   if not f then return end
-  local raw = f:read("*all") or ""
-  f:close()
-  if #raw < 3 then return end
-  local ok, data = pcall(serialization.unserialize, raw)
-  if not ok or type(data) ~= "table" then return end
-
-  local clean = {}
-  for _, entry in ipairs(data) do
-    if type(entry) == "table" and type(entry.name) == "string" and type(entry.addr) == "string" then
-      table.insert(clean, {
-        name = entry.name,
-        addr = entry.addr,
-        glyphen = type(entry.glyphen) == "string" and entry.glyphen or ""
-      })
+  local raw=f:read("*all") or ""; f:close()
+  if #raw<3 then return end
+  local ok,data=pcall(serialization.unserialize,raw)
+  if not ok or type(data)~="table" then return end
+  local clean={}
+  for _,entry in ipairs(data) do
+    if type(entry)=="table" and type(entry.name)=="string" and type(entry.addr)=="string" then
+      table.insert(clean,{name=entry.name,addr=entry.addr,glyphen=type(entry.glyphen)=="string" and entry.glyphen or ""})
     end
   end
-  if #clean > 0 then ADRESSBUCH = clean end
+  if #clean>0 then ADRESSBUCH=clean end
 end
 
-local function inputLine(prompt, default)
-  gpu.setBackground(C_PANEL)
-  gpu.setForeground(C_TEXT)
-  term.write(prompt .. (default or "") .. ": ")
-  local value = term.read(nil, nil, nil, default or "")
-  if value == nil then return nil end
-  value = tostring(value)
-  if value == "" then return default or "" end
+local function inputLine(prompt,default)
+  gpu.setBackground(C_PANEL); gpu.setForeground(C_TEXT)
+  term.write(prompt.." ["..(default or "").."]: ")
+  local value=term.read()
+  if value==nil then return nil end
+  value=tostring(value)
+  if value=="" then return default or "" end
   return value
 end
 
 local function addAddress()
-  term.clear()
-  gpu.setBackground(C_BG)
-  gpu.setForeground(C_CYAN)
+  term.clear(); gpu.setBackground(C_BG); gpu.setForeground(C_CYAN)
   print("=== SGC ADRESSBUCH / NEUE ADRESSE ===")
-  local name = inputLine("Name", "Neue Adresse")
-  local addr = inputLine("Adresse", "")
-  local glyphen = inputLine("Glyphe (optional)", "")
-  if name and addr and addr ~= "" then
-    table.insert(ADRESSBUCH, {name=name, addr=addr, glyphen=glyphen or ""})
-    saveAddresses()
-    sgcStatusText = "ADRESSE GESPEICHERT"
+  local name=inputLine("Name","Neue Adresse")
+  local addr=inputLine("Adresse","")
+  local glyphen=inputLine("Glyphe (optional)","")
+  if name and addr and addr~="" then
+    table.insert(ADRESSBUCH,{name=name,addr=addr,glyphen=glyphen or ""}); saveAddresses(); sgcStatusText="ADRESSE GESPEICHERT"
   end
 end
 
 local function editAddress(index)
-  local entry = ADRESSBUCH[index]
-  if not entry then return end
-  term.clear()
-  gpu.setBackground(C_BG)
-  gpu.setForeground(C_CYAN)
+  local entry=ADRESSBUCH[index]; if not entry then return end
+  term.clear(); gpu.setBackground(C_BG); gpu.setForeground(C_CYAN)
   print("=== SGC ADRESSBUCH / BEARBEITEN ===")
-  local name = inputLine("Name", entry.name)
-  local addr = inputLine("Adresse", entry.addr)
-  local glyphen = inputLine("Glyphe", entry.glyphen)
-  if name and addr and addr ~= "" then
-    entry.name = name
-    entry.addr = addr
-    entry.glyphen = glyphen or ""
-    saveAddresses()
-    sgcStatusText = "ADRESSE AKTUALISIERT"
+  local name=inputLine("Name",entry.name)
+  local addr=inputLine("Adresse",entry.addr)
+  local glyphen=inputLine("Glyphe",entry.glyphen)
+  if name and addr and addr~="" then
+    entry.name=name; entry.addr=addr; entry.glyphen=glyphen or ""; saveAddresses(); sgcStatusText="ADRESSE AKTUALISIERT"
   end
 end
 
 local function deleteAddress(index)
   if not ADRESSBUCH[index] then return end
-  table.remove(ADRESSBUCH, index)
-  saveAddresses()
-  sgcStatusText = "ADRESSE GELÖSCHT"
+  table.remove(ADRESSBUCH,index); saveAddresses(); sgcStatusText="ADRESSE GELÖSCHT"
 end
 
 local function drawBox(x,y,w,h,title,titleColor)
-  gpu.setBackground(C_PANEL)
-  gpu.fill(x,y,w,h," ")
-  gpu.setForeground(C_BORDER)
-  gpu.fill(x,y,w,1,"━")
-  gpu.fill(x,y+h-1,w,1,"━")
+  gpu.setBackground(C_PANEL); gpu.fill(x,y,w,h," "); gpu.setForeground(C_BORDER)
+  gpu.fill(x,y,w,1,"━"); gpu.fill(x,y+h-1,w,1,"━")
   for i=0,h-1 do gpu.set(x,y+i,"┃"); gpu.set(x+w-1,y+i,"┃") end
   gpu.set(x,y,"┏"); gpu.set(x+w-1,y,"┓"); gpu.set(x,y+h-1,"┗"); gpu.set(x+w-1,y+h-1,"┛")
-  if title then
-    gpu.setForeground(titleColor or C_CYAN)
-    gpu.set(x+3,y,"┤ "..title.." ├")
-  end
+  if title then gpu.setForeground(titleColor or C_CYAN); gpu.set(x+3,y,"┤ "..title.." ├") end
 end
 
 local function drawButton(x,y,w,h,text,bg,fg)
-  gpu.setBackground(bg)
-  gpu.fill(x,y,w,h," ")
-  gpu.setForeground(fg or C_TEXT)
-  local textLen = unicode.len(text)
-  gpu.set(x+math.floor((w-textLen)/2),y+math.floor(h/2),text)
+  gpu.setBackground(bg); gpu.fill(x,y,w,h," "); gpu.setForeground(fg or C_TEXT)
+  gpu.set(x+math.floor((w-unicode.len(text))/2),y+math.floor(h/2),text)
 end
 
 local function playChevronSound(isFinal)
@@ -182,74 +141,40 @@ end
 local function drawTopChevronLatch(x,y,isLocking,isEngaged,symbolText)
   gpu.setBackground(C_PANEL)
   if isEngaged then
-    gpu.setForeground(C_CHEV_ON)
-    gpu.set(x+11,y-1,"╒═════════╕")
-    gpu.set(x+11,y,"│ "..string.format("%-7s",symbolText).." │")
-    gpu.set(x+11,y+1,"╘═══▼▼▼═══╛")
+    gpu.setForeground(C_CHEV_ON); gpu.set(x+11,y-1,"╒═════════╕"); gpu.set(x+11,y,"│ "..string.format("%-7s",symbolText).." │"); gpu.set(x+11,y+1,"╘═══▼▼▼═══╛")
   elseif isLocking then
-    gpu.setForeground(C_CHEV_LOCK)
-    gpu.set(x+11,y-1,"╒  ▼▼▼▼  ╕")
-    gpu.set(x+11,y,"│ LOCKED! │")
-    gpu.set(x+11,y+1,"╘═════════╛")
+    gpu.setForeground(C_CHEV_LOCK); gpu.set(x+11,y-1,"╒  ▼▼▼▼  ╕"); gpu.set(x+11,y,"│ LOCKED! │"); gpu.set(x+11,y+1,"╘═════════╛")
   else
-    gpu.setForeground(C_CHEV_OFF)
-    gpu.set(x+11,y-1,"┌  ┬───┬  ┐")
-    gpu.set(x+11,y,"│ [CHEV 7]│")
-    gpu.set(x+11,y+1,"└  ┴───┴  ┘")
+    gpu.setForeground(C_CHEV_OFF); gpu.set(x+11,y-1,"┌  ┬───┬  ┐"); gpu.set(x+11,y,"│ [CHEV 7]│"); gpu.set(x+11,y+1,"└  ┴───┴  ┘")
   end
 end
 
 local function drawSGCGateSystem(x,y,state,chevronsEngaged)
-  local activeChevs = tonumber(chevronsEngaged) or 0
-  if state == "Connected" then activeChevs = 7 end
-  local isLockingNow = false
-  if activeChevs > letztesChevron and activeChevs <= 7 then
-    letztesChevron = activeChevs
-    drehRichtung = (activeChevs % 2 == 0) and 1 or -1
-    isLockingNow = true
-    if activeChevs == 7 or state == "Connected" then
-      sgcStatusText = "CHEVRON 7 IS LOCKED!"
-      playChevronSound(true)
-    else
-      sgcStatusText = string.format("CHEVRON %d LOCKED (%s)",activeChevs,GLYPH_CODES[ACTIVE_DIAL_SEQUENCE[activeChevs]] or "SYMBOL")
-      playChevronSound(false)
-    end
-  elseif state == "Idle" or state == "No Gate" then
+  local activeChevs=tonumber(chevronsEngaged) or 0
+  if state=="Connected" then activeChevs=7 end
+  local isLockingNow=false
+  if activeChevs>letztesChevron and activeChevs<=7 then
+    letztesChevron=activeChevs; drehRichtung=(activeChevs%2==0) and 1 or -1; isLockingNow=true
+    if activeChevs==7 or state=="Connected" then sgcStatusText="CHEVRON 7 IS LOCKED!"; playChevronSound(true)
+    else sgcStatusText=string.format("CHEVRON %d LOCKED (%s)",activeChevs,GLYPH_CODES[ACTIVE_DIAL_SEQUENCE[activeChevs]] or "SYMBOL"); playChevronSound(false) end
+  elseif state=="Idle" or state=="No Gate" then
     letztesChevron=0; ringWinkel=0; sgcStatusText="SYSTEM IDLE - WAITING FOR DIAL COMMAND"
-  elseif state == "Dialling" then
-    ringWinkel=(ringWinkel+(drehRichtung*3))%360
+  elseif state=="Dialling" then
+    ringWinkel=(ringWinkel+drehRichtung*3)%360
     if not isLockingNow then sgcStatusText=string.format("ENCODING CHEVRON %d...",math.min(activeChevs+1,7)) end
   end
-
   gpu.setBackground(C_PANEL); gpu.setForeground(C_RING_METALL)
-  gpu.set(x+10,y+1,"⢀⣀⣤⣤⣤⣤⣤⣤⣤⣤⣀⡀")
-  gpu.set(x+5,y+2,"⣠⣾⠿⠉⠉        ⠉⠉⠿⣷⣄")
-  gpu.set(x+3,y+3,"⣵⡿⠁                ⠈⢿⣦")
-  gpu.set(x+1,y+4,"⣾⡿                     ⢿⣷")
-  gpu.set(x,y+5,"⣿⡇                     ⢸⣿")
-  gpu.set(x,y+6,"⣿⡇                     ⢸⣿")
-  gpu.set(x,y+7,"⣿⡇                     ⢸⣿")
-  gpu.set(x+1,y+8,"⢿⣷                     ⣾⡿")
-  gpu.set(x+3,y+9,"⠹⣷⣄                ⣠⣾⠏")
-  gpu.set(x+5,y+10,"⠈⠻⢿⣦⣤⣀        ⣀⣤⣴⠿⠟⠁")
-  gpu.set(x+10,y+11,"⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉")
-
+  gpu.set(x+10,y+1,"⢀⣀⣤⣤⣤⣤⣤⣤⣤⣤⣀⡀"); gpu.set(x+5,y+2,"⣠⣾⠿⠉⠉        ⠉⠉⠿⣷⣄"); gpu.set(x+3,y+3,"⣵⡿⠁                ⠈⢿⣦"); gpu.set(x+1,y+4,"⣾⡿                     ⢿⣷")
+  gpu.set(x,y+5,"⣿⡇                     ⢸⣿"); gpu.set(x,y+6,"⣿⡇                     ⢸⣿"); gpu.set(x,y+7,"⣿⡇                     ⢸⣿"); gpu.set(x+1,y+8,"⢿⣷                     ⣾⡿")
+  gpu.set(x+3,y+9,"⠹⣷⣄                ⣠⣾⠏"); gpu.set(x+5,y+10,"⠈⠻⢿⣦⣤⣀        ⣀⣤⣴⠿⠟⠁"); gpu.set(x+10,y+11,"⠉⠉⠉⠉⠉⠉⠉⠉⠉⠉")
   local topSymbol=(activeChevs>=7) and (GLYPH_CODES[ACTIVE_DIAL_SEQUENCE[7]] or "EARTH") or "✦"
   drawTopChevronLatch(x,y+1,isLockingNow and activeChevs==7,activeChevs>=7,topSymbol)
-
   local chevPos={[1]={x=x+25,y=y+3},[2]={x=x+27,y=y+6},[3]={x=x+25,y=y+9},[4]={x=x+1,y=y+9},[5]={x=x-1,y=y+6},[6]={x=x+1,y=y+3}}
   for cNr,pos in ipairs(chevPos) do
-    if cNr<=activeChevs then
-      gpu.setForeground(C_CHEV_ON)
-      gpu.set(pos.x,pos.y,"["..(GLYPH_CODES[ACTIVE_DIAL_SEQUENCE[cNr]] or "LOCK").."]")
-    elseif state=="Dialling" and cNr==activeChevs+1 then
-      gpu.setForeground(C_GELB)
-      gpu.set(pos.x,pos.y,(animFrame%2==0) and "[SEARCH]" or "[======]")
-    else
-      gpu.setForeground(C_CHEV_OFF); gpu.set(pos.x,pos.y,"[------]")
-    end
+    if cNr<=activeChevs then gpu.setForeground(C_CHEV_ON); gpu.set(pos.x,pos.y,"["..(GLYPH_CODES[ACTIVE_DIAL_SEQUENCE[cNr]] or "LOCK").."]")
+    elseif state=="Dialling" and cNr==activeChevs+1 then gpu.setForeground(C_GELB); gpu.set(pos.x,pos.y,(animFrame%2==0) and "[SEARCH]" or "[======]")
+    else gpu.setForeground(C_CHEV_OFF); gpu.set(pos.x,pos.y,"[------]") end
   end
-
   if state=="Connected" then
     kawooshFrame=(kawooshFrame+1)%3; gpu.setBackground(C_KAWOOSH); gpu.setForeground(0xFFFFFF)
     local wav=(kawooshFrame==0 and "≈~≈~≈~≈~≈~") or (kawooshFrame==1 and "~≈~≈~≈~≈~≈") or "▒░▒░▒░▒░▒░"
@@ -261,56 +186,28 @@ local function drawSGCGateSystem(x,y,state,chevronsEngaged)
 end
 
 local function renderUI(s)
-  animFrame=(animFrame+1)%4
-  local rD=s.lastDaten or {}
-  gpu.setBackground(C_BG); term.clear()
-  gpu.setBackground(C_PANEL); gpu.fill(1,1,120,3," "); gpu.setForeground(C_CYAN)
-  gpu.set(3,2,"◈ SGC COMMAND CENTER - COMPUTER DIALING PROGRAM")
+  animFrame=(animFrame+1)%4; local rD=s.lastDaten or {}
+  gpu.setBackground(C_BG); term.clear(); gpu.setBackground(C_PANEL); gpu.fill(1,1,120,3," "); gpu.setForeground(C_CYAN); gpu.set(3,2,"◈ SGC COMMAND CENTER - COMPUTER DIALING PROGRAM")
   drawButton(50,2,18,1,"[ REAKTOR ]",(CURRENT_TAB=="REAKTOR") and C_CYAN or C_BORDER,(CURRENT_TAB=="REAKTOR") and C_BG or C_TEXT)
   drawButton(70,2,18,1,"[ STARGATE DHD ]",(CURRENT_TAB=="STARGATE") and C_LILA or C_BORDER,(CURRENT_TAB=="STARGATE") and C_BG or C_TEXT)
-
   if CURRENT_TAB=="STARGATE" then
-    drawBox(2,5,62,24,"SGC CHEVRON & SYMBOL TELEMETRIE",C_CYAN)
-    drawSGCGateSystem(5,6,s.sgState or "Idle",s.sgChevrons or 0)
-    drawBox(38,7,23,5,"SGC LOG",C_GELB); gpu.setBackground(C_PANEL); gpu.setForeground(C_GELB)
-    gpu.set(40,9,string.sub(sgcStatusText,1,19)); if #sgcStatusText>19 then gpu.set(40,10,string.sub(sgcStatusText,20,38)) end
-    drawButton(38,14,23,2,"IRIS ÖFFNEN",C_GRUEN,C_BG)
-    drawButton(38,17,23,2,"IRIS SCHLIESSEN",C_ROT,C_TEXT)
-    drawButton(38,20,23,2,"ABBRECHEN",C_BORDER,C_TEXT)
-
+    drawBox(2,5,62,24,"SGC CHEVRON & SYMBOL TELEMETRIE",C_CYAN); drawSGCGateSystem(5,6,s.sgState or "Idle",s.sgChevrons or 0)
+    drawBox(38,7,23,5,"SGC LOG",C_GELB); gpu.setBackground(C_PANEL); gpu.setForeground(C_GELB); gpu.set(40,9,string.sub(sgcStatusText,1,19)); if #sgcStatusText>19 then gpu.set(40,10,string.sub(sgcStatusText,20,38)) end
+    drawButton(38,14,23,2,"IRIS ÖFFNEN",C_GRUEN,C_BG); drawButton(38,17,23,2,"IRIS SCHLIESSEN",C_ROT,C_TEXT); drawButton(38,20,23,2,"ABBRECHEN",C_BORDER,C_TEXT)
     drawBox(66,5,52,24,"DHD COMPUTER DIALING (SGC)",C_LILA)
-    local visible = math.min(#ADRESSBUCH,3)
+    local visible=math.min(#ADRESSBUCH,3)
     for idx=1,visible do
-      local entry=ADRESSBUCH[idx]; local yP=7+(idx-1)*6
-      drawBox(68,yP,48,5,entry.name,C_CYAN)
-      gpu.setBackground(C_PANEL); gpu.setForeground(C_TEXT_MUTED)
-      gpu.set(70,yP+2,string.sub(entry.glyphen or "",1,18))
-      drawButton(89,yP+1,12,3,"WÄHLEN",C_LILA,C_TEXT)
-      drawButton(102,yP+1,12,3,"EDIT",C_BORDER,C_TEXT)
+      local entry=ADRESSBUCH[idx]; local yP=7+(idx-1)*6; drawBox(68,yP,48,5,entry.name,C_CYAN); gpu.setBackground(C_PANEL); gpu.setForeground(C_TEXT_MUTED); gpu.set(70,yP+2,string.sub(entry.glyphen or "",1,18))
+      drawButton(89,yP+1,12,3,"WÄHLEN",C_LILA,C_TEXT); drawButton(102,yP+1,12,3,"EDIT",C_BORDER,C_TEXT)
     end
-    drawButton(69,26,15,2,"+ NEU",C_CYAN,C_BG)
-    drawButton(85,26,15,2,"LÖSCHEN",C_ROT,C_TEXT)
-    gpu.setForeground(C_TEXT_MUTED); gpu.set(101,27,string.format("%d/%d",visible,#ADRESSBUCH))
-
-  elseif CURRENT_TAB=="REAKTOR" then
-    drawBox(2,5,58,24,"REAKTOR-KERN STATUS",C_GELB)
-    gpu.setBackground(C_PANEL); gpu.setForeground(C_TEXT)
-    gpu.set(5,8,string.format("Temperatur  : %d °C",tonumber(rD.tempKern) or 0))
-    gpu.set(5,10,string.format("Ausstoß     : %d RF/t",tonumber(rD.rfProTick) or 0))
-    gpu.set(5,12,string.format("Energie     : %.1f %%",tonumber(rD.prozent) or 0))
-    gpu.set(5,14,string.format("Steuerstäbe : %d %%",tonumber(rD.steuerstaebe) or tonumber(s.rods) or 0))
-    drawBox(62,5,56,24,"STEUERUNG & EINSTELLUNGEN",C_CYAN)
-    drawButton(65,8,22,3,"▲ STÄBE HEBEN",C_BORDER,C_TEXT)
-    drawButton(90,8,22,3,"▼ STÄBE SENKEN",C_BORDER,C_TEXT)
-    gpu.setForeground(C_TEXT_MUTED); gpu.set(65,13,string.format("TEMP LIMIT: %s °C",tostring(s.temp or "---")))
-    gpu.set(65,15,"Sicherheitsabschaltung aktiv")
+    drawButton(69,26,15,2,"+ NEU",C_CYAN,C_BG); drawButton(85,26,15,2,"LÖSCHEN",C_ROT,C_TEXT); gpu.setForeground(C_TEXT_MUTED); gpu.set(101,27,string.format("%d/%d",visible,#ADRESSBUCH))
+  else
+    drawBox(2,5,58,24,"REAKTOR-KERN STATUS",C_GELB); gpu.setBackground(C_PANEL); gpu.setForeground(C_TEXT)
+    gpu.set(5,8,string.format("Temperatur  : %d °C",tonumber(rD.tempKern) or 0)); gpu.set(5,10,string.format("Ausstoß     : %d RF/t",tonumber(rD.rfProTick) or 0)); gpu.set(5,12,string.format("Energie     : %.1f %%",tonumber(rD.prozent) or 0)); gpu.set(5,14,string.format("Steuerstäbe : %d %%",tonumber(rD.steuerstaebe) or tonumber(s.rods) or 0))
+    drawBox(62,5,56,24,"STEUERUNG & EINSTELLUNGEN",C_CYAN); drawButton(65,8,22,3,"▲ STÄBE HEBEN",C_BORDER,C_TEXT); drawButton(90,8,22,3,"▼ STÄBE SENKEN",C_BORDER,C_TEXT); gpu.setForeground(C_TEXT_MUTED); gpu.set(65,13,string.format("TEMP LIMIT: %s °C",tostring(s.temp or "---"))); gpu.set(65,15,"Sicherheitsabschaltung aktiv")
   end
-
-  gpu.setBackground(C_PANEL); gpu.fill(1,30,120,5," "); gpu.setForeground(C_BORDER); gpu.fill(1,30,120,1,"━")
-  gpu.setForeground(C_TEXT); gpu.set(3,32,string.format("Gesamtertrag: %s RF",tostring(s.gesamtRF or 0)))
-  drawButton(60,31,16,3,"AUTO",(s.modus=="AUTO") and C_GRUEN or C_BORDER,C_BG)
-  drawButton(78,31,16,3,"START",(s.modus=="MANUELL_AN") and C_GRUEN or C_BORDER,C_BG)
-  drawButton(96,31,16,3,"STOPP",(s.modus=="MANUELL_AUS") and C_ROT or C_BORDER,C_TEXT)
+  gpu.setBackground(C_PANEL); gpu.fill(1,30,120,5," "); gpu.setForeground(C_BORDER); gpu.fill(1,30,120,1,"━"); gpu.setForeground(C_TEXT); gpu.set(3,32,string.format("Gesamtertrag: %s RF",tostring(s.gesamtRF or 0)))
+  drawButton(60,31,16,3,"AUTO",(s.modus=="AUTO") and C_GRUEN or C_BORDER,C_BG); drawButton(78,31,16,3,"START",(s.modus=="MANUELL_AN") and C_GRUEN or C_BORDER,C_BG); drawButton(96,31,16,3,"STOPP",(s.modus=="MANUELL_AUS") and C_ROT or C_BORDER,C_TEXT)
 end
 
 loadAddresses()
@@ -318,59 +215,31 @@ loadAddresses()
 while true do
   modem.broadcast(PORT_REMOTE,serialization.serialize({cmd="GET_DATA"}))
   local eventTyp,_,sender,port,_,message=event.pullMultiple(0.12,"modem_message","touch")
-
   if eventTyp=="modem_message" and port==PORT_REMOTE and message and tostring(message)~="" then
     serverAddress=sender
     local success,serverDaten=pcall(serialization.unserialize,tostring(message))
     if success and type(serverDaten)=="table" then renderUI(serverDaten) end
-
   elseif eventTyp=="touch" then
     local x,y=tonumber(sender) or 0,tonumber(port) or 0
-
-    if y==2 then
-      if x>=50 and x<=68 then CURRENT_TAB="REAKTOR"
-      elseif x>=70 and x<=88 then CURRENT_TAB="STARGATE" end
-    end
-
+    if y==2 then if x>=50 and x<=68 then CURRENT_TAB="REAKTOR" elseif x>=70 and x<=88 then CURRENT_TAB="STARGATE" end end
     if CURRENT_TAB=="STARGATE" then
-      if y>=14 and y<=15 and x>=38 and x<=60 and serverAddress then
-        modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SG_IRIS_OPEN"}))
-      elseif y>=17 and y<=18 and x>=38 and x<=60 and serverAddress then
-        modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SG_IRIS_CLOSE"}))
-      elseif y>=20 and y<=21 and x>=38 and x<=60 and serverAddress then
-        modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SG_DISCONNECT"}))
-      elseif x>=89 and x<=100 then
-        local index=math.floor((y-8)/6)+1
-        if index>=1 and index<=visible then end
-      end
-
+      if y>=14 and y<=15 and x>=38 and x<=60 and serverAddress then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SG_IRIS_OPEN"}))
+      elseif y>=17 and y<=18 and x>=38 and x<=60 and serverAddress then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SG_IRIS_CLOSE"}))
+      elseif y>=20 and y<=21 and x>=38 and x<=60 and serverAddress then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SG_DISCONNECT"})) end
       local rowIndex=nil
       if y>=8 and y<=10 then rowIndex=1 elseif y>=14 and y<=16 then rowIndex=2 elseif y>=20 and y<=22 then rowIndex=3 end
       if rowIndex and ADRESSBUCH[rowIndex] then
-        if x>=89 and x<=100 and serverAddress then
-          modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SG_DIAL",val=ADRESSBUCH[rowIndex].addr}))
-        elseif x>=102 and x<=114 then
-          editAddress(rowIndex)
-        end
+        if x>=89 and x<=100 and serverAddress then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SG_DIAL",val=ADRESSBUCH[rowIndex].addr}))
+        elseif x>=102 and x<=114 then editAddress(rowIndex) end
       elseif y>=26 and y<=27 then
-        if x>=69 and x<=83 then
-          addAddress()
-        elseif x>=85 and x<=99 then
-          if #ADRESSBUCH>0 then deleteAddress(#ADRESSBUCH) end
-        end
+        if x>=69 and x<=83 then addAddress()
+        elseif x>=85 and x<=99 and #ADRESSBUCH>0 then deleteAddress(#ADRESSBUCH) end
       end
-
     elseif CURRENT_TAB=="REAKTOR" and serverAddress then
-      if y>=8 and y<=10 then
-        if x>=65 and x<=87 then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="RODS_UP"}))
-        elseif x>=90 and x<=112 then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="RODS_DOWN"})) end
-      end
+      if y>=8 and y<=10 then if x>=65 and x<=87 then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="RODS_UP"})) elseif x>=90 and x<=112 then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="RODS_DOWN"})) end end
     end
-
     if y>=31 and y<=33 and serverAddress then
-      if x>=60 and x<=76 then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SET_MODUS",val="AUTO"}))
-      elseif x>=78 and x<=94 then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SET_MODUS",val="MANUELL_AN"}))
-      elseif x>=96 and x<=112 then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SET_MODUS",val="MANUELL_AUS"})) end
+      if x>=60 and x<=76 then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SET_MODUS",val="AUTO"})) elseif x>=78 and x<=94 then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SET_MODUS",val="MANUELL_AN"})) elseif x>=96 and x<=112 then modem.send(serverAddress,PORT_REMOTE,serialization.serialize({cmd="SET_MODUS",val="MANUELL_AUS"})) end
     end
   end
 end
