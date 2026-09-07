@@ -55,8 +55,7 @@ local function loadConfig()
 end
 loadConfig()
 
--- SGCraft2-compatible Stargate hardware adapter.
--- The GUI is untouched: only discovery/invocation is handled here.
+-- SGCraft hardware adapter. The GUI stays unchanged.
 local function methodMap(address)
  local result={}; local ok,m=pcall(component.methods,address)
  if ok and type(m)=="table" then for name,value in pairs(m) do if value then result[name]=true end end end
@@ -68,16 +67,16 @@ local function findStargate()
  if ok and p then
   local address=p.address or p
   local okProxy,proxy=pcall(component.proxy,address)
-  if not okProxy then proxy=p end
+  if not okProxy then proxy=nil end
   return {address=address,proxy=proxy,methods=methodMap(address)}
  end
- local list=component.list("stargate")
- if list then
-  for address in list do
-   local ok2,proxy=pcall(component.proxy,address)
-   if ok2 then return {address=address,proxy=proxy,methods=methodMap(address)} end
+ local okList,found=pcall(function()
+  for address in component.list("stargate") do
+   local okProxy,proxy=pcall(component.proxy,address)
+   if okProxy then return {address=address,proxy=proxy,methods=methodMap(address)} end
   end
- end
+ end)
+ if okList and found then return found end
  return nil
 end
 local function ensureSG()
@@ -95,25 +94,32 @@ end
 local function hasMethod(name)
  refreshSGMethods(); return sg.methods[name]==true
 end
+local unpackFn=table.unpack or unpack
 local function invoke(method,...)
  if not ensureSG() then return false,nil,"NO STARGATE INTERFACE" end
  local args={...}
- if type(component.invoke)=="function" then
-  local ok,a,b,c=pcall(function() return component.invoke(sg.address,method,unpack(args)) end)
-  if ok and a~=nil then return true,a,b,c end
-  if not ok then return false,nil,tostring(a) end
+ local ok,a,b,c=pcall(function() return component.invoke(sg.address,method,unpackFn(args,1,#args)) end)
+ if ok and a~=nil then return true,a,b,c end
+ if not ok then
+  -- Retry through the proxy; this also handles interfaces whose direct invoke rejects a call.
+  if sg.proxy and type(sg.proxy[method])=="function" then
+   local pok,pa,pb,pc=pcall(function() return sg.proxy[method](unpackFn(args,1,#args)) end)
+   if pok and pa~=nil then return true,pa,pb,pc end
+   return false,nil,tostring(pa)
+  end
+  return false,nil,tostring(a)
  end
  if sg.proxy and type(sg.proxy[method])=="function" then
-  local ok,a,b,c=pcall(function() return sg.proxy[method](unpack(args)) end)
-  if ok and a~=nil then return true,a,b,c end
-  if not ok then return false,nil,tostring(a) end
+  local pok,pa,pb,pc=pcall(function() return sg.proxy[method](unpackFn(args,1,#args)) end)
+  if pok and pa~=nil then return true,pa,pb,pc end
+  if not pok then return false,nil,tostring(pa) end
  end
- return false,nil,"METHOD NOT AVAILABLE: "..method
+ return false,nil,tostring(b or ("METHOD NOT AVAILABLE: "..method))
 end
 local function updateIrisCapability()
  if not ensureSG() then sg.irisAvailable=false; return end
  refreshSGMethods()
- sg.irisAvailable=(sg.methods.openIris and sg.methods.closeIris) or (sg.methods.irisOpen and sg.methods.irisClose)
+ sg.irisAvailable=(sg.methods.openIris==true and sg.methods.closeIris==true) or (sg.methods.irisOpen==true and sg.methods.irisClose==true)
 end
 local function refreshSG()
  if not ensureSG() then sg.state="Offline"; sg.engaged=0; sg.iris="N/A"; sg.irisAvailable=false; sg.localAddress=nil; return end
@@ -127,7 +133,9 @@ local function refreshSG()
 end
 local function sgAction(method,arg)
  if not ensureSG() then setLog("SG: KEIN STARGATE INTERFACE"); return false end
- local ok,a,b=invoke(method,arg)
+ local ok,a,b
+ -- IMPORTANT: zero-argument SGCraft methods must receive zero arguments.
+ if arg==nil then ok,a,b=invoke(method) else ok,a,b=invoke(method,arg) end
  if not ok then setLog("SG: "..method.." FEHLER / "..tostring(b or a)); return false end
  return true
 end
@@ -136,12 +144,16 @@ local function iris(open)
  if not sg.irisAvailable then setLog("IRIS NICHT VERFÜGBAR / KEINE SGCraft-Iris-API"); return false end
  local method
  if open then method=hasMethod("openIris") and "openIris" or "irisOpen" else method=hasMethod("closeIris") and "closeIris" or "irisClose" end
- if sgAction(method) then sg.iris=open and "OPEN" or "CLOSED"; setLog(open and "IRIS GEÖFFNET" or "IRIS GESCHLOSSEN"); return true end
+ if sgAction(method) then
+  sg.iris=open and "Open" or "Closed"
+  setLog(open and "IRIS GEÖFFNET" or "IRIS GESCHLOSSEN")
+  return true
+ end
  return false
 end
 local function dialGate(addr)
  addr=tostring(addr or ""):gsub("[^0-9A-Za-z]",""):upper()
- if #addr~=7 and #addr~=9 then setLog("SG: ADRESSE MUSS 7 ODER 9 SYMBOLE HABEN"); return false end
+ if #addr~=7 and #addr~=9 then setLog("SG: ADRESSE MUSS 7 ODER 9 SYMBOLE HABEN (Bindestriche erlaubt)"); return false end
  if sgAction("dial",addr) then setLog("SG: WÄHLE "..addr); return true end
  return false
 end
@@ -202,7 +214,7 @@ end
 local function touch(x,y)
  if y==17 then if x<18 then iris(true) elseif x<34 then iris(false) elseif x<55 then disconnectGate() end
  elseif y==19 then if x<14 then modus="AUTO"; setLog("REAKTOR: AUTO") elseif x<29 then modus="MANUELL_AN"; sendReactor("AN",true); setLog("REAKTOR: START") elseif x<48 then modus="MANUELL_AUS"; sendReactor("AUS",true); setLog("REAKTOR: STOPP") end
- elseif y==21 then if x<15 then shell.execute("floppy_backup.lua","backup") elseif x<30 then shell.execute("floppy_backup.lua","restore") else shell.execute("floppy_backup.lua","status") end end
+ elseif y==21 then if x<15 then shell.execute("floppy_backup.lua","backup SERVER") elseif x<30 then shell.execute("floppy_backup.lua","restore SERVER") else shell.execute("floppy_backup.lua","status SERVER") end end
  refreshGUI()
 end
 
