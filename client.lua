@@ -4,6 +4,7 @@ local serialization = require("serialization")
 local event = require("event")
 local term = require("term")
 local shell = require("shell")
+local sides = require("sides")
 
 if not component.isAvailable("br_reactor") or not component.isAvailable("modem") or
    not component.isAvailable("gpu") or not component.isAvailable("redstone") then
@@ -19,6 +20,38 @@ local PORT = 101
 local SERVER_TIMEOUT = 3
 local misses = 0
 local guiMessage = "Bereit"
+
+-- Redstone-Lampe: Seite ist egal.
+-- Die Lampe kann an FRONT, BACK, LEFT, RIGHT, TOP oder BOTTOM angeschlossen werden.
+-- Mit ALL werden alle sechs Seiten gleichzeitig geschaltet.
+local REDSTONE_LAMP_SIDE = "ALL"
+local REDSTONE_ON = 15
+local REDSTONE_OFF = 0
+
+local REDSTONE_SIDES = {
+  front = sides.front,
+  back = sides.back,
+  left = sides.left,
+  right = sides.right,
+  top = sides.top,
+  bottom = sides.bottom
+}
+
+local function setLampOutput(value)
+  value = tonumber(value) or REDSTONE_OFF
+  if value ~= 0 then value = REDSTONE_ON end
+
+  if REDSTONE_LAMP_SIDE == "ALL" then
+    for _, side in pairs(REDSTONE_SIDES) do
+      pcall(rs.setOutput, side, value)
+    end
+  else
+    local side = REDSTONE_SIDES[string.lower(REDSTONE_LAMP_SIDE)]
+    if side ~= nil then
+      pcall(rs.setOutput, side, value)
+    end
+  end
+end
 
 modem.open(PORT)
 if modem.setStrength then modem.setStrength(400) end
@@ -64,26 +97,30 @@ local function zeichneClientStatus(verbindungsStatus, detailText)
   if verbindungsStatus == "ONLINE" then
     gpu.setForeground(0x2ECC71)
     print("[ VERBUNDEN ]")
+    setLampOutput(REDSTONE_ON)
     setzeSignalAufAllenSeiten(FARBE_WEISS, 15)
     setzeSignalAufAllenSeiten(FARBE_ROT, 0)
   elseif verbindungsStatus == "SUCHEND" then
     gpu.setForeground(0xF1C40F)
     print("[ WARTE AUF SERVER... ]")
+    setLampOutput(REDSTONE_OFF)
     setzeSignalAufAllenSeiten(FARBE_WEISS, 0)
     setzeSignalAufAllenSeiten(FARBE_ROT, 15)
   else
     gpu.setForeground(0xE74C3C)
     print("[ OFFLINE / DISCONNECT ]")
+    setLampOutput(REDSTONE_OFF)
     setzeSignalAufAllenSeiten(FARBE_WEISS, 0)
     setzeSignalAufAllenSeiten(FARBE_ROT, 15)
   end
   gpu.setForeground(0xECF0F1)
   print(" Info: " .. (detailText or "Initialisiere..."))
+  print(" Lampe: Redstone-Card | Seite: " .. REDSTONE_LAMP_SIDE)
   print("============================================================")
-  drawButton(2, 13, 24, 3, "[ BACKUP REACTOR ]", 0x1A2332, 0xECF0F1)
-  drawButton(28, 13, 24, 3, "[ RESTORE REACTOR ]", 0x1A2332, 0xECF0F1)
+  drawButton(2, 14, 24, 2, "[ BACKUP REACTOR ]", 0x1A2332, 0xECF0F1)
+  drawButton(28, 14, 24, 2, "[ RESTORE REACTOR ]", 0x1A2332, 0xECF0F1)
   gpu.setForeground(0x00E5FF)
-  gpu.set(2, 12, string.sub(guiMessage, 1, 56))
+  gpu.set(2, 13, string.sub(guiMessage, 1, 56))
 end
 
 local function getNumber(obj, method, fallback)
@@ -248,7 +285,7 @@ while true do
     elseif eventTyp == "touch" then
       local touchX = tonumber(senderOrX) or 0
       local touchY = tonumber(portOrY) or 0
-      if touchY >= 13 and touchY <= 15 then
+      if touchY >= 14 and touchY <= 15 then
         if touchX >= 2 and touchX <= 25 then
           floppyCommand("backup")
         elseif touchX >= 28 and touchX <= 52 then
@@ -279,9 +316,11 @@ while true do
       if reactor.setActive and getBool(reactor, "getActive", false) then
         pcall(reactor.setActive, false)
       end
+      setLampOutput(REDSTONE_OFF)
       setzeSignalAufAllenSeiten(FARBE_ROT, 15)
       zeichneClientStatus("OFFLINE", "Watchdog-Timeout! Notabschaltung aktiv.")
     else
+      setLampOutput(REDSTONE_OFF)
       zeichneClientStatus("SUCHEND", "Keine Serverantwort - erneuter Versuch...")
     end
   end
