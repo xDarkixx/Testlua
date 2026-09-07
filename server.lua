@@ -1,245 +1,255 @@
--- TESTLUA SERVER - OpenComputers 1.7.10
--- Server fuer Reactor + SGCraft. GUI wird nur bei echten Aenderungen aktualisiert.
+-- Testlua Server Controller
+-- OpenComputers 1.7.10 / SGCraft 1.13.3 / BigReactors 0.4.3A
+-- Design intentionally kept compatible with the existing SGC film GUI.
+
 local component = require("component")
 local event = require("event")
 local serialization = require("serialization")
-local fs = require("filesystem")
+local filesystem = require("filesystem")
 local shell = require("shell")
 
 if not component.isAvailable("modem") then
-  io.stderr:write("Fehler: Modem fehlt!\n")
-  return
+  error("Testlua Server: Modem fehlt")
 end
 
 local modem = component.modem
 local gpu = component.isAvailable("gpu") and component.gpu or nil
 local screen = component.isAvailable("screen") and component.screen or nil
-local PORT_REAKTOR, PORT_REMOTE = 101, 102
-modem.open(PORT_REAKTOR)
-modem.open(PORT_REMOTE)
+if gpu and screen then pcall(gpu.bind, gpu, screen.address) end
 
-local currentDir = shell.getWorkingDirectory() or "/"
-local SAVE_FILE = fs.concat(currentDir, "reactor_config.dat")
+local PORT_REACTOR = 101
+local PORT_SERVER = 102
+pcall(modem.open, PORT_REACTOR)
+pcall(modem.open, PORT_SERVER)
+
+local CONFIG_FILE = "reactor_config.dat"
 local AUTO_SENSOR = "TEMP"
-local SCHWELLE_AN, SCHWELLE_AUS = 10, 90
 local TEMP_MIN, TEMP_MAX = 750, 1000
 local ENERGY_MIN, ENERGY_MAX = 20, 90
 local ROD_MIN, ROD_MAX, ROD_STEP = 0, 100, 5
-local gesamtRF_Erzeugt, MODUS, steuerstabZiel = 0, "AUTO", 0
-local signalStaerke = 400
-local lastDaten, graphHistory = {}, {}
-for i=1,24 do graphHistory[i]=0 end
-if modem.setStrength then pcall(modem.setStrength, signalStaerke) end
 
-local function clamp(v,lo,hi)
-  v=tonumber(v) or lo
-  if v<lo then return lo end
-  if v>hi then return hi end
-  return v
+local reactor = {
+  online=false, active=false, temperature=0, energy=0,
+  rods=0, rodLevels={}, lastSeen=0
+}
+local stargate = {
+  proxy=nil, state="Offline", engaged=0, direction="", iris="UNKNOWN", address=""
+}
+local messageLog = "SYSTEM BEREIT"
+local guiDrawn = false
+
+local function setLog(s)
+  messageLog = tostring(s or "")
 end
 
 local function saveConfig()
-  pcall(function()
-    local f=io.open(SAVE_FILE,"w")
-    if f then
-      f:write(serialization.serialize({an=SCHWELLE_AN,aus=SCHWELLE_AUS,tempMin=TEMP_MIN,tempMax=TEMP_MAX,energyMin=ENERGY_MIN,energyMax=ENERGY_MAX,autoSensor=AUTO_SENSOR,rods=steuerstabZiel,rodMin=ROD_MIN,rodMax=ROD_MAX,rodStep=ROD_STEP,rf=gesamtRF_Erzeugt,strength=signalStaerke}))
-      f:close()
-    end
-  end)
+  local f = filesystem.open(CONFIG_FILE, "w")
+  if not f then return end
+  f:write(serialization.serialize({
+    sensor=AUTO_SENSOR, tempMin=TEMP_MIN, tempMax=TEMP_MAX,
+    energyMin=ENERGY_MIN, energyMax=ENERGY_MAX,
+    rodMin=ROD_MIN, rodMax=ROD_MAX, rodStep=ROD_STEP
+  }))
+  f:close()
 end
 
 local function loadConfig()
-  if not fs.exists(SAVE_FILE) then return end
-  local f=io.open(SAVE_FILE,"r")
+  if not filesystem.exists(CONFIG_FILE) then return end
+  local f = filesystem.open(CONFIG_FILE, "r")
   if not f then return end
-  local text=f:read("*all") or ""; f:close()
-  local ok,d=pcall(serialization.unserialize,text)
-  if not ok or type(d)~="table" then return end
-  SCHWELLE_AN=clamp(d.an,0,100); SCHWELLE_AUS=clamp(d.aus,SCHWELLE_AN,100)
-  TEMP_MIN=math.max(1,tonumber(d.tempMin) or 750); TEMP_MAX=math.max(TEMP_MIN+1,tonumber(d.tempMax) or 1000)
-  ENERGY_MIN=clamp(d.energyMin,0,100); ENERGY_MAX=clamp(d.energyMax,ENERGY_MIN,100)
-  local s=tostring(d.autoSensor or "TEMP"); AUTO_SENSOR=(s=="ENERGY" or s=="HYBRID") and s or "TEMP"
-  ROD_MIN=clamp(d.rodMin,0,100); ROD_MAX=clamp(d.rodMax,ROD_MIN,100); ROD_STEP=clamp(d.rodStep,1,25)
-  steuerstabZiel=clamp(d.rods,ROD_MIN,ROD_MAX); gesamtRF_Erzeugt=math.max(0,tonumber(d.rf) or 0)
-  signalStaerke=clamp(d.strength,1,400)
-  if modem.setStrength then pcall(modem.setStrength,signalStaerke) end
+  local data = f:read(math.huge)
+  f:close()
+  local ok,t = pcall(serialization.unserialize, data)
+  if ok and type(t)=="table" then
+    AUTO_SENSOR=t.sensor or AUTO_SENSOR
+    TEMP_MIN=t.tempMin or TEMP_MIN; TEMP_MAX=t.tempMax or TEMP_MAX
+    ENERGY_MIN=t.energyMin or ENERGY_MIN; ENERGY_MAX=t.energyMax or ENERGY_MAX
+    ROD_MIN=t.rodMin or ROD_MIN; ROD_MAX=t.rodMax or ROD_MAX
+    ROD_STEP=t.rodStep or ROD_STEP
+  end
 end
+loadConfig()
 
-local function getStargate()
+-- SGCraft 1.13.3: use the OpenComputers Stargate Interface component.
+-- Primary works for the normal one-gate setup; list/proxy is the fallback.
+local function findStargate()
   if not component.isAvailable("stargate") then return nil end
-  local ok,sg=pcall(component.getPrimary,"stargate")
-  if ok and sg then return sg end
+  local ok,p = pcall(component.getPrimary, "stargate")
+  if ok and p then return p end
+  local list = component.list("stargate")
+  if list then
+    local address = list()
+    if address then
+      local ok2,proxy = pcall(component.proxy, address)
+      if ok2 then return proxy end
+    end
+  end
   return nil
 end
 
-local function getStargateData()
-  local sg=getStargate()
-  if not sg then return "NO GATE",0,"N/A","N/A" end
-  local state,chev,iris,addr="UNKNOWN",0,"UNKNOWN","N/A"
-  pcall(function()
-    if sg.stargateState then
-      local a,b=sg.stargateState(); state=a or state; chev=tonumber(b) or 0
-    end
-    if sg.irisState then iris=sg.irisState() or iris end
-    if sg.localAddress then addr=sg.localAddress() or addr end
-  end)
-  return tostring(state),chev,tostring(iris),tostring(addr)
+local function callSG(method,...)
+  local sg = stargate.proxy
+  if not sg or type(sg[method]) ~= "function" then return false,nil end
+  local ok,a,b,c = pcall(sg[method], ...)
+  if ok then return true,{a,b,c} end
+  setLog("SG FEHLER: "..tostring(a))
+  return false,nil
 end
 
-local function rodCount(payload)
-  return math.max(1,math.floor(tonumber(payload and payload.rodCount) or 1))
-end
-
-local function sendReactorCommand(address,cmd,target,payload)
-  local count=rodCount(payload); local levels={}
-  target=clamp(target or steuerstabZiel,ROD_MIN,ROD_MAX)
-  for i=0,count-1 do levels[i]=target end
-  modem.send(address,PORT_REAKTOR,serialization.serialize({befehl=cmd,rods=target,rodLevels=levels,rodStep=ROD_STEP}))
-end
-
-local function setAutoValue(cmd,value)
-  if cmd=="SET_AUTO_SENSOR" then
-    local s=tostring(value or "")
-    if s~="TEMP" and s~="ENERGY" and s~="HYBRID" then return false end
-    AUTO_SENSOR=s; saveConfig(); return true
+local function refreshStargate()
+  if not stargate.proxy then stargate.proxy=findStargate() end
+  if not stargate.proxy then
+    stargate.state="Offline"; stargate.iris="N/A"; stargate.address="N/A"
+    return
   end
-  value=tonumber(value); if not value then return false end
-  if cmd=="SET_TEMP_MIN" then TEMP_MIN=math.max(1,math.min(TEMP_MAX-1,value))
-  elseif cmd=="SET_TEMP_MAX" then TEMP_MAX=math.max(TEMP_MIN+1,value)
-  elseif cmd=="SET_ENERGY_MIN" then ENERGY_MIN=clamp(value,0,ENERGY_MAX-1)
-  elseif cmd=="SET_ENERGY_MAX" then ENERGY_MAX=clamp(value,ENERGY_MIN+1,100)
-  elseif cmd=="SET_ROD_MIN" then ROD_MIN=clamp(value,0,ROD_MAX); steuerstabZiel=math.max(steuerstabZiel,ROD_MIN)
-  elseif cmd=="SET_ROD_MAX" then ROD_MAX=clamp(value,ROD_MIN,100); steuerstabZiel=math.min(steuerstabZiel,ROD_MAX)
-  elseif cmd=="SET_ROD_STEP" then ROD_STEP=clamp(value,1,25)
-  else return false end
-  saveConfig(); return true
-end
-
-local function autoControl(p)
-  local temp=tonumber(p.tempKern) or 0; local energy=clamp(p.prozent,0,100); local active=not not p.istAktiv
-  local target=clamp(steuerstabZiel,ROD_MIN,ROD_MAX)
-  if not active then
-    if AUTO_SENSOR=="TEMP" and temp<=TEMP_MIN then return "AN",target end
-    if AUTO_SENSOR=="ENERGY" and energy<=ENERGY_MIN then return "AN",target end
-    if AUTO_SENSOR=="HYBRID" and temp<=TEMP_MIN and energy<=ENERGY_MIN then return "AN",target end
-    return "PING",target
+  local ok,r=callSG("stargateState")
+  if ok and r then
+    stargate.state=tostring(r[1] or "Unknown")
+    stargate.engaged=tonumber(r[2] or 0) or 0
+    stargate.direction=tostring(r[3] or "")
   end
-  if temp>=TEMP_MAX then return "AUS",ROD_MAX end
-  if AUTO_SENSOR=="TEMP" or AUTO_SENSOR=="HYBRID" then
-    if temp>=TEMP_MAX-50 then target=math.min(ROD_MAX,target+ROD_STEP)
-    elseif temp<=TEMP_MIN then target=math.max(ROD_MIN,target-ROD_STEP) end
-  end
-  if AUTO_SENSOR=="ENERGY" or AUTO_SENSOR=="HYBRID" then
-    if energy>=ENERGY_MAX then target=math.min(ROD_MAX,target+ROD_STEP)
-    elseif energy<=ENERGY_MIN then target=math.max(ROD_MIN,target-ROD_STEP) end
-  end
-  return "PING",target
+  local ok2,r2=callSG("irisState")
+  if ok2 and r2 then stargate.iris=tostring(r2[1] or r2[1] or "UNKNOWN") end
+  local ok3,r3=callSG("localAddress")
+  if ok3 and r3 then stargate.address=tostring(r3[1] or "") end
 end
 
--- GUI: statischer Rahmen wird nur einmal gezeichnet; danach werden nur Datenzeilen erneuert.
-local guiReady=false
-local guiW,guiH=0,0
-local function guiLine(y,text)
-  if not guiReady then return end
-  gpu.setForeground(0xFFFFFF); gpu.setBackground(0x101820)
-  gpu.fill(2,y,guiW-2,1," "); gpu.set(2,y,tostring(text):sub(1,math.max(1,guiW-2)))
+local function sendReactor(command,value)
+  local packet={cmd=command,value=value}
+  modem.broadcast(PORT_REACTOR, serialization.serialize(packet))
 end
 
-local function drawButton(x,y,w,text)
-  gpu.setBackground(0x202830); gpu.setForeground(0xFFFFFF); gpu.fill(x,y,w,1," "); gpu.set(x+1,y,"[ "..text.." ]")
+local function dialGate(address)
+  if not address or address=="" then setLog("SG: KEINE ADRESSE"); return end
+  if not stargate.proxy then stargate.proxy=findStargate() end
+  if not stargate.proxy then setLog("SG: INTERFACE NICHT GEFUNDEN"); return end
+  local ok,err=pcall(stargate.proxy.dial, address)
+  if ok then setLog("SG: WÄHLE "..address) else setLog("SG DIAL FEHLER: "..tostring(err)) end
 end
 
-local function initGUI()
+local function iris(open)
+  if not stargate.proxy then stargate.proxy=findStargate() end
+  if not stargate.proxy then setLog("SG: INTERFACE NICHT GEFUNDEN"); return end
+  local method=open and "openIris" or "closeIris"
+  local ok,err=pcall(stargate.proxy[method])
+  if ok then setLog(open and "IRIS GEÖFFNET" or "IRIS GESCHLOSSEN")
+  else setLog("IRIS FEHLER: "..tostring(err)) end
+end
+
+local function disconnectGate()
+  if not stargate.proxy then stargate.proxy=findStargate() end
+  if not stargate.proxy then setLog("SG: INTERFACE NICHT GEFUNDEN"); return end
+  local ok,err=pcall(stargate.proxy.disconnect)
+  if ok then setLog("SG: VERBINDUNG GETRENNT") else setLog("SG DISCONNECT FEHLER: "..tostring(err)) end
+end
+
+local function drawFrame()
   if not gpu or not screen then return end
-  local ok=pcall(gpu.bind,screen.address); if not ok then return end
-  guiW,guiH=gpu.getResolution(); if guiW<50 or guiH<12 then return end
-  gpu.setBackground(0x101820); gpu.setForeground(0xFFFFFF); gpu.fill(1,1,guiW,guiH," ")
-  gpu.setForeground(0x00FFFF); gpu.set(2,2,"TESTLUA SERVER")
-  gpu.setForeground(0xAAAAAA); gpu.set(2,3,"Zentraler SGC / BigReactors Controller")
-  gpu.setForeground(0xFFFFFF); gpu.set(2,5,"STATUS: ONLINE")
-  gpu.set(2,6,"MODEM: ONLINE   PORT 101: REAKTOR   PORT 102: REMOTE")
-  drawButton(2,guiH-2,13,"BACKUP"); drawButton(17,guiH-2,14,"RESTORE"); drawButton(33,guiH-2,13,"STATUS")
-  gpu.setForeground(0x777777); gpu.set(2,guiH,"TESTLUA SERVER - Modem-Dienst aktiv")
-  guiReady=true
+  local w,h=gpu.getResolution()
+  gpu.fill(1,1,w,h," ")
+  gpu.set(2,1,"TESTLUA SERVER // SGC CONTROL")
+  gpu.set(2,3,"[ REAKTOR ]   [ STARGATE ]")
+  gpu.set(2,5,"REAKTOR TELEMETRIE")
+  gpu.set(2,6,"Status: --------")
+  gpu.set(2,7,"Temperatur: --------")
+  gpu.set(2,8,"Energy:     --------")
+  gpu.set(2,9,"Stäbe:      --------")
+  gpu.set(2,11,"STARGATE TELEMETRIE")
+  gpu.set(2,12,"State:      --------")
+  gpu.set(2,13,"Chevron:    --------")
+  gpu.set(2,14,"Iris:       --------")
+  gpu.set(2,15,"Adresse:    --------")
+  gpu.set(2,17,"[ IRIS AUF ] [ IRIS ZU ] [ TRENNEN ]")
+  gpu.set(2,19,"[ AUTO ] [ START ] [ STOPP ]")
+  gpu.set(2,21,"[ BACKUP ] [ RESTORE ] [ STATUS ]")
+  gpu.set(2,23,"LOG:")
+  gpu.set(2,24,messageLog:sub(1, math.max(1,w-3)))
+  guiDrawn=true
 end
 
-local function refreshGUI(message)
-  if not guiReady then return end
-  guiLine(7,"MODUS: "..MODUS.."   AUTO: "..AUTO_SENSOR.."   STÄBE: "..tostring(steuerstabZiel).."%")
-  local p=tonumber(lastDaten.prozent); local t=tonumber(lastDaten.tempKern)
-  guiLine(8,"REAKTOR: "..(lastDaten.istAktiv and "AKTIV" or "WARTET").."   TEMP: "..(t and string.format("%.1fK",t) or "--").."   ENERGY: "..(p and string.format("%.1f%%",p) or "--"))
-  local state,chev,iris,addr=getStargateData()
-  guiLine(9,"STARGATE: "..state.."   CHEVRONS: "..chev.."   IRIS: "..iris)
-  guiLine(10,"ADDRESS: "..addr)
-  if message then gpu.setForeground(0xFFFF00); gpu.setBackground(0x101820); gpu.fill(2,guiH-3,guiW-2,1," "); gpu.set(2,guiH-3,tostring(message):sub(1,guiW-2)) end
+local function updateLine(y,text)
+  if not gpu or not screen then return end
+  local w,h=gpu.getResolution()
+  if y>h then return end
+  gpu.fill(1,y,w,1," ")
+  gpu.set(2,y,text:sub(1,math.max(1,w-3)))
 end
 
-loadConfig(); initGUI(); refreshGUI("Server gestartet")
+local function refreshGUI()
+  if not gpu or not screen then return end
+  if not guiDrawn then drawFrame() end
+  updateLine(6,"Status:      "..(reactor.online and (reactor.active and "AKTIV" or "AUS") or "OFFLINE"))
+  updateLine(7,string.format("Temperatur:  %.1f C",reactor.temperature or 0))
+  updateLine(8,string.format("Energy:      %.1f %%",reactor.energy or 0))
+  updateLine(9,string.format("Stäbe:       %d",reactor.rods or 0))
+  updateLine(12,"State:       "..stargate.state)
+  updateLine(13,"Chevron:     "..tostring(stargate.engaged))
+  updateLine(14,"Iris:        "..stargate.iris)
+  updateLine(15,"Adresse:     "..stargate.address)
+  updateLine(24,"LOG: "..messageLog)
+end
 
+local function handleTouch(x,y)
+  if y==17 then
+    if x<18 then iris(true) elseif x<34 then iris(false) elseif x<55 then disconnectGate() end
+  elseif y==19 then
+    if x<14 then sendReactor("AUTO",true); setLog("REAKTOR: AUTO")
+    elseif x<29 then sendReactor("AN",true); setLog("REAKTOR: START")
+    elseif x<48 then sendReactor("AUS",true); setLog("REAKTOR: STOPP") end
+  elseif y==21 then
+    if x<15 then shell.execute("floppy_backup.lua", "backup")
+    elseif x<30 then shell.execute("floppy_backup.lua", "restore")
+    else shell.execute("floppy_backup.lua", "status") end
+  end
+  refreshGUI()
+end
+
+local function handlePacket(a,b,c,d,e)
+  -- OpenComputers modem_message:
+  -- event, localAddress, remoteAddress, port, distance, message
+  local senderAddress=b
+  local port=tonumber(c)
+  local message=e
+  if port~=PORT_REACTOR and port~=PORT_SERVER then return end
+  if type(message)=="string" then
+    local ok,p=pcall(serialization.unserialize,message)
+    if ok and type(p)=="table" then message=p end
+  end
+  if type(message)~="table" then return end
+
+  if port==PORT_REACTOR then
+    reactor.online=true; reactor.lastSeen=os.clock()
+    reactor.active=message.active==true or message.active==1
+    reactor.temperature=tonumber(message.temperature or message.temp or 0) or 0
+    reactor.energy=tonumber(message.energy or message.energyPercent or 0) or 0
+    reactor.rods=tonumber(message.rods or message.rodLevel or 0) or 0
+    if type(message.rodLevels)=="table" then reactor.rodLevels=message.rodLevels end
+  elseif port==PORT_SERVER then
+    local cmd=message.cmd
+    if cmd=="SG_DIAL" then dialGate(message.address)
+    elseif cmd=="SG_IRIS_OPEN" then iris(true)
+    elseif cmd=="SG_IRIS_CLOSE" then iris(false)
+    elseif cmd=="SG_DISCONNECT" then disconnectGate()
+    end
+  end
+end
+
+if gpu and screen then drawFrame() end
+refreshStargate(); refreshGUI()
+
+local lastSG=0
 while true do
-  local ev,a,b,c,d,e=event.pullMultiple(1.0,"modem_message","touch")
-
-  if ev=="touch" and guiReady then
-    -- OpenComputers: touch, screenAddress, x, y, button, user
-    local x=tonumber(b); local y=tonumber(c)
-    if x and y and y==guiH-2 then
-      if x>=2 and x<=14 then
-        refreshGUI("Backup läuft...")
-        shell.execute("floppy_backup.lua backup")
-        refreshGUI("Backup fertig")
-      elseif x>=17 and x<=31 then
-        refreshGUI("Restore läuft...")
-        shell.execute("floppy_backup.lua restore")
-        refreshGUI("Restore fertig")
-      elseif x>=33 and x<=46 then
-        refreshGUI("Status aktualisiert")
-      end
-    end
-
-  elseif ev=="modem_message" then
-    local senderAddress=a; local port=b; local message=e
-    if message and tostring(message)~="" then
-      local ok,p=pcall(serialization.unserialize,tostring(message))
-      if ok and type(p)=="table" then
-        if port==PORT_REAKTOR and p.prozent~=nil then
-          lastDaten=p
-          if p.istAktiv then gesamtRF_Erzeugt=gesamtRF_Erzeugt+((tonumber(p.rfProTick) or 0)*20) end
-          table.remove(graphHistory,1); table.insert(graphHistory,tonumber(p.rfProTick) or 0)
-          local cmd="PING"
-          if MODUS=="AUTO" then cmd,steuerstabZiel=autoControl(p)
-          elseif MODUS=="MANUELL_AN" then cmd="AN"
-          elseif MODUS=="MANUELL_AUS" then cmd="AUS" end
-          steuerstabZiel=clamp(steuerstabZiel,ROD_MIN,ROD_MAX)
-          sendReactorCommand(senderAddress,cmd,steuerstabZiel,p)
-          saveConfig(); refreshGUI()
-
-        elseif port==PORT_REMOTE and p.cmd then
-          local cmd=tostring(p.cmd)
-          if cmd=="GET_DATA" then
-            local sgState,sgChevrons,sgIris,sgAddr=getStargateData()
-            modem.send(senderAddress,PORT_REMOTE,serialization.serialize({lastDaten=lastDaten,graphHistory=graphHistory,gesamtRF=gesamtRF_Erzeugt,an=SCHWELLE_AN,aus=SCHWELLE_AUS,tempMin=TEMP_MIN,tempMax=TEMP_MAX,temp=TEMP_MAX,energyMin=ENERGY_MIN,energyMax=ENERGY_MAX,autoSensor=AUTO_SENSOR,rods=steuerstabZiel,rodMin=ROD_MIN,rodMax=ROD_MAX,rodStep=ROD_STEP,modus=MODUS,sgState=sgState,sgChevrons=sgChevrons,sgIris=sgIris,sgAddr=sgAddr}))
-          elseif cmd=="SET_TEMP_MIN" or cmd=="SET_TEMP_MAX" or cmd=="SET_ENERGY_MIN" or cmd=="SET_ENERGY_MAX" or cmd=="SET_ROD_MIN" or cmd=="SET_ROD_MAX" or cmd=="SET_ROD_STEP" or cmd=="SET_AUTO_SENSOR" then
-            setAutoValue(cmd,p.val); refreshGUI("Einstellung gespeichert")
-          elseif cmd=="SET_RODS" then steuerstabZiel=clamp(p.val,ROD_MIN,ROD_MAX); saveConfig(); refreshGUI()
-          elseif cmd=="RODS_DOWN" then steuerstabZiel=math.min(ROD_MAX,steuerstabZiel+ROD_STEP); saveConfig(); refreshGUI()
-          elseif cmd=="RODS_UP" then steuerstabZiel=math.max(ROD_MIN,steuerstabZiel-ROD_STEP); saveConfig(); refreshGUI()
-          elseif cmd=="SET_MODUS" then
-            local m=tostring(p.val or "AUTO")
-            if m=="AUTO" or m=="MANUELL_AN" or m=="MANUELL_AUS" then MODUS=m; saveConfig(); refreshGUI() end
-          else
-            local sg=getStargate()
-            if sg then
-              if cmd=="SG_IRIS_OPEN" and sg.openIris then pcall(sg.openIris)
-              elseif cmd=="SG_IRIS_CLOSE" and sg.closeIris then pcall(sg.closeIris)
-              elseif cmd=="SG_DISCONNECT" and sg.disconnect then pcall(sg.disconnect)
-              elseif cmd=="SG_DIAL" and sg.dial and type(p.val)=="string" then pcall(sg.dial,p.val) end
-              refreshGUI("Stargate-Befehl: "..cmd)
-            else
-              refreshGUI("Kein Stargate gefunden")
-            end
-          end
-        end
-      end
-    end
+  local ev,a,b,c,d,e=event.pullMultiple(0.5,"modem_message","touch")
+  if ev=="modem_message" then
+    handlePacket(a,b,c,d,e)
+  elseif ev=="touch" then
+    -- touch: event, screenAddress, x, y, button, user
+    handleTouch(tonumber(b) or 0, tonumber(c) or 0)
+  end
+  if os.clock()-lastSG>1 then
+    lastSG=os.clock()
+    refreshStargate()
+    if reactor.online and os.clock()-reactor.lastSeen>4 then reactor.online=false end
+    refreshGUI()
   end
 end
