@@ -3,6 +3,7 @@ local os = require("os")
 local serialization = require("serialization")
 local event = require("event")
 local term = require("term")
+local shell = require("shell")
 
 if not component.isAvailable("br_reactor") or not component.isAvailable("modem") or
    not component.isAvailable("gpu") or not component.isAvailable("redstone") then
@@ -17,11 +18,12 @@ local rs = component.redstone
 local PORT = 101
 local SERVER_TIMEOUT = 3
 local misses = 0
+local guiMessage = "Bereit"
 
 modem.open(PORT)
 if modem.setStrength then modem.setStrength(400) end
 
-gpu.setResolution(50, 14)
+gpu.setResolution(60, 16)
 gpu.setBackground(0x0C0F12)
 term.clear()
 
@@ -35,12 +37,29 @@ local function setzeSignalAufAllenSeiten(farbe, staerke)
   end
 end
 
+local function drawButton(x, y, w, h, text, bg, fg)
+  gpu.setBackground(bg)
+  gpu.fill(x, y, w, h, " ")
+  gpu.setForeground(fg or 0xECF0F1)
+  gpu.set(x + math.max(1, math.floor((w - #text) / 2)), y + math.floor(h / 2), text)
+end
+
+local function floppyCommand(command)
+  local ok, result = pcall(shell.execute, "floppy_backup.lua " .. command)
+  if ok and result ~= false then
+    guiMessage = command == "backup" and "BACKUP: TESTLUA-REACTOR" or "RESTORE: TESTLUA-REACTOR"
+  else
+    guiMessage = "Floppy nicht gefunden / Fehler"
+  end
+end
+
 local function zeichneClientStatus(verbindungsStatus, detailText)
   term.clear()
+  gpu.setBackground(0x0C0F12)
   gpu.setForeground(0x56B3FA)
-  print("==================================================")
-  print("        REAKTOR-NETZWERK CLIENT v9.2             ")
-  print("==================================================")
+  print("============================================================")
+  print("             REAKTOR-NETZWERK CLIENT v10                    ")
+  print("============================================================")
   io.write(" Status: ")
   if verbindungsStatus == "ONLINE" then
     gpu.setForeground(0x2ECC71)
@@ -60,12 +79,17 @@ local function zeichneClientStatus(verbindungsStatus, detailText)
   end
   gpu.setForeground(0xECF0F1)
   print(" Info: " .. (detailText or "Initialisiere..."))
-  print("==================================================")
+  print("============================================================")
+  drawButton(2, 13, 24, 3, "[ BACKUP REACTOR ]", 0x1A2332, 0xECF0F1)
+  drawButton(28, 13, 24, 3, "[ RESTORE REACTOR ]", 0x1A2332, 0xECF0F1)
+  gpu.setForeground(0x00E5FF)
+  gpu.set(2, 12, string.sub(guiMessage, 1, 56))
 end
 
 local function getNumber(obj, method, fallback)
   if not obj or not obj[method] then return fallback end
   local ok, value = pcall(obj[method])
+  if not ok then return fallback end
   value = tonumber(value)
   return value or fallback
 end
@@ -85,10 +109,12 @@ end
 
 local function getRodLevel(index)
   if reactor.getControlRodLevel then
-    return getNumber(reactor, "getControlRodLevel", 0)
+    local ok, value = pcall(reactor.getControlRodLevel, index)
+    if ok and tonumber(value) then return tonumber(value) end
   end
   if reactor.getControlRodInsertion then
-    return getNumber(reactor, "getControlRodInsertion", 0)
+    local ok, value = pcall(reactor.getControlRodInsertion, index)
+    if ok and tonumber(value) then return tonumber(value) end
   end
   return 0
 end
@@ -162,8 +188,8 @@ while true do
     if turbine then
       daten.hatTurbine = true
       daten.turbineRPM = math.floor(getNumber(turbine, "getRotorSpeed", 0))
-      if turbine.getFluidAmountMax then
-        daten.turbineDampf = math.floor(getNumber(turbine, "getFluidAmountMax", 0))
+      if turbine.getFluidAmount then
+        daten.turbineDampf = math.floor(getNumber(turbine, "getFluidAmount", 0))
       elseif turbine.getFluidCapacity then
         daten.turbineDampf = math.floor(getNumber(turbine, "getFluidCapacity", 0))
       end
@@ -174,11 +200,23 @@ while true do
   modem.broadcast(PORT, serialization.serialize(daten))
 
   local antwort = nil
+  local touchX, touchY
   for _ = 1, SERVER_TIMEOUT do
-    local eventTyp, _, _, port, _, netzwerkAntwort = event.pull(1.0, "modem_message")
-    if eventTyp == "modem_message" and port == PORT and netzwerkAntwort and tostring(netzwerkAntwort) ~= "" then
-      antwort = netzwerkAntwort
+    local eventTyp, _, sender, port, y, message = event.pull(1.0)
+    if eventTyp == "modem_message" and port == PORT and message and tostring(message) ~= "" then
+      antwort = message
       break
+    elseif eventTyp == "touch" then
+      touchX = tonumber(sender) or 0
+      touchY = tonumber(port) or 0
+      if touchY >= 13 and touchY <= 15 then
+        if touchX >= 2 and touchX <= 25 then
+          floppyCommand("backup")
+        elseif touchX >= 28 and touchX <= 52 then
+          floppyCommand("restore")
+        end
+        zeichneClientStatus("ONLINE", "Floppy-Aktion ausgeführt")
+      end
     end
   end
 
