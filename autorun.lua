@@ -1,8 +1,11 @@
 -- Automatische Rollenerkennung fuer OpenComputers 1.7.10
 local component = require("component")
+local shell = require("shell")
 
 local function starten(datei)
-  local ok, err = pcall(os.execute, datei)
+  local ok, err = pcall(function()
+    shell.execute(datei)
+  end)
   if not ok then
     io.stderr:write("Fehler beim Starten von " .. datei .. ": " .. tostring(err) .. "\n")
   end
