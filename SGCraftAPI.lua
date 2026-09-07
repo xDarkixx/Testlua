@@ -1,5 +1,5 @@
 -- Testlua SGCraft API
--- OpenComputers 1.7.10 / SGCraft 1.13.x
+-- OpenComputers 1.7.10 / SGCraft 1.13.3
 -- Local API: no dependency on lua2/sgcraft2.
 
 local component=require("component")
@@ -10,10 +10,32 @@ local function invoke(address,name,...)
  if not address or address=="" then return false,nil,"NO STARGATE INTERFACE ADDRESS" end
  if type(component.invoke)~="function" then return false,nil,"component.invoke unavailable" end
  local args={...}
- local ok,a,b,c=pcall(function() return component.invoke(address,name,unpackFn(args)) end)
+ local ok,a,b,c=pcall(function()
+  return component.invoke(address,name,unpackFn(args,1,#args))
+ end)
  if ok and a~=nil then return true,a,b,c end
  if not ok then return false,nil,tostring(a) end
  return false,nil,tostring(b or ("API CALL FAILED: "..tostring(name)))
+end
+
+local function cleanAddress(value)
+ local raw=tostring(value or "")
+ -- SGCraft accepts addresses with or without hyphens.
+ -- Spaces and other visual separators are also ignored for keyboard input.
+ return raw:gsub("[^0-9A-Za-z]",""):upper()
+end
+
+function API.normalizeAddress(value)
+ local address=cleanAddress(value)
+ if #address~=7 and #address~=9 then return nil,"ADDRESS MUST HAVE 7 OR 9 SYMBOLS" end
+ return address
+end
+
+function API.formatAddress(value)
+ local address=cleanAddress(value)
+ if #address==7 then return address:sub(1,4).."-"..address:sub(5,7) end
+ if #address==9 then return address:sub(1,4).."-"..address:sub(5,7).."-"..address:sub(8,9) end
+ return address
 end
 
 function API.methods(address)
@@ -35,19 +57,13 @@ function API.find()
   if not okProxy then proxy=nil end
   return {address=address,proxy=proxy,methods=API.methods(address),primary=true}
  end
- local okList=pcall(function()
+ local okList,found=pcall(function()
   for address in component.list("stargate") do
    local okProxy,proxy=pcall(component.proxy,address)
    if okProxy then return {address=address,proxy=proxy,methods=API.methods(address),primary=false} end
   end
  end)
- if okList then
-  -- component.list iteration is handled below because return inside pcall is not portable across OC Lua variants.
- end
- for address in component.list("stargate") do
-  local okProxy,proxy=pcall(component.proxy,address)
-  if okProxy then return {address=address,proxy=proxy,methods=API.methods(address),primary=false} end
- end
+ if okList and found then return found end
  return nil,"NO STARGATE INTERFACE FOUND"
 end
 
@@ -74,7 +90,7 @@ function API.call(gate,name,...)
  if ok then return true,a,b,c end
  if gate.proxy and type(gate.proxy[name])=="function" then
   local args={...}
-  local pok,pa,pb,pc=pcall(function() return gate.proxy[name](unpackFn(args)) end)
+  local pok,pa,pb,pc=pcall(function() return gate.proxy[name](unpackFn(args,1,#args)) end)
   if pok and pa~=nil then return true,pa,pb,pc end
   if not pok then return false,nil,tostring(pa) end
  end
@@ -82,9 +98,9 @@ function API.call(gate,name,...)
 end
 
 function API.dial(gate,address)
- address=tostring(address or ""):gsub("[^0-9A-Za-z]",""):upper()
- if #address~=7 and #address~=9 then return false,nil,"ADDRESS MUST HAVE 7 OR 9 SYMBOLS" end
- return API.call(gate,"dial",address)
+ local normalized,err=API.normalizeAddress(address)
+ if not normalized then return false,nil,err end
+ return API.call(gate,"dial",normalized)
 end
 
 function API.disconnect(gate) return API.call(gate,"disconnect") end
