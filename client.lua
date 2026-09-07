@@ -5,6 +5,7 @@ local event = require("event")
 local term = require("term")
 local shell = require("shell")
 local sides = require("sides")
+local fs = require("filesystem")
 
 if not component.isAvailable("br_reactor") or not component.isAvailable("modem") or
    not component.isAvailable("gpu") or not component.isAvailable("redstone") then
@@ -21,10 +22,8 @@ local SERVER_TIMEOUT = 3
 local misses = 0
 local guiMessage = "Bereit"
 local lastGuiSignature = nil
+local currentDir = shell.getWorkingDirectory() or "/"
 
--- Redstone-Lampe: Seite ist egal.
--- Die Lampe kann an FRONT, BACK, LEFT, RIGHT, TOP oder BOTTOM angeschlossen werden.
--- Mit ALL werden alle sechs Seiten gleichzeitig geschaltet.
 local REDSTONE_LAMP_SIDE = "ALL"
 local REDSTONE_ON = 15
 local REDSTONE_OFF = 0
@@ -41,16 +40,11 @@ local REDSTONE_SIDES = {
 local function setLampOutput(value)
   value = tonumber(value) or REDSTONE_OFF
   if value ~= 0 then value = REDSTONE_ON end
-
   if REDSTONE_LAMP_SIDE == "ALL" then
-    for _, side in pairs(REDSTONE_SIDES) do
-      pcall(rs.setOutput, side, value)
-    end
+    for _, side in pairs(REDSTONE_SIDES) do pcall(rs.setOutput, side, value) end
   else
     local side = REDSTONE_SIDES[string.lower(REDSTONE_LAMP_SIDE)]
-    if side ~= nil then
-      pcall(rs.setOutput, side, value)
-    end
+    if side ~= nil then pcall(rs.setOutput, side, value) end
   end
 end
 
@@ -67,9 +61,7 @@ local FARBE_ROT = 14
 
 local function setzeSignalAufAllenSeiten(farbe, staerke)
   if not rs.setBundledOutput then return end
-  for seite = 0, 5 do
-    pcall(rs.setBundledOutput, seite, farbe, staerke)
-  end
+  for seite = 0, 5 do pcall(rs.setBundledOutput, seite, farbe, staerke) end
 end
 
 local function drawButton(x, y, w, h, text, bg, fg)
@@ -79,26 +71,49 @@ local function drawButton(x, y, w, h, text, bg, fg)
   gpu.set(x + math.max(1, math.floor((w - #text) / 2)), y + math.floor(h / 2), text)
 end
 
+-- Backup/Restore wird direkt aus dem aktuellen Arbeitsverzeichnis gestartet.
+-- Dadurch ist es egal, wo die Testlua-Dateien installiert wurden.
 local function floppyCommand(command)
-  local ok, result = pcall(shell.execute, "floppy_backup.lua " .. command)
+  local script = fs.concat(currentDir, "floppy_backup.lua")
+  if not fs.exists(script) then
+    guiMessage = "FEHLER: floppy_backup.lua fehlt"
+    return
+  end
+
+  -- shell.execute arbeitet zuverlässiger mit dem relativen Dateinamen aus
+  -- dem aktuellen Arbeitsverzeichnis als mit einem möglicherweise langen Pfad.
+  local oldDir = shell.getWorkingDirectory()
+  local changedDir = false
+  if oldDir ~= currentDir and shell.setWorkingDirectory then
+    local ok = pcall(shell.setWorkingDirectory, currentDir)
+    changedDir = ok
+  end
+
+  local ok, result = pcall(shell.execute, "floppy_backup.lua " .. tostring(command))
+
+  if changedDir and oldDir and shell.setWorkingDirectory then
+    pcall(shell.setWorkingDirectory, oldDir)
+  end
+
   if ok and result ~= false then
-    guiMessage = command == "backup" and "BACKUP: TESTLUA-REACTOR" or "RESTORE: TESTLUA-REACTOR"
+    if command == "backup" then
+      guiMessage = "BACKUP ERFOLGREICH: TESTLUA-REACTOR"
+    else
+      guiMessage = "RESTORE ERFOLGREICH: TESTLUA-REACTOR"
+    end
   else
-    guiMessage = "Floppy nicht gefunden / Fehler"
+    guiMessage = (command == "backup" and "BACKUP FEHLGESCHLAGEN" or "RESTORE FEHLGESCHLAGEN") ..
+      " - Konsole pruefen"
   end
 end
 
--- Die GUI wird nur neu gezeichnet, wenn sich der sichtbare Zustand wirklich geändert hat.
--- Dadurch wird das typische term.clear()-Flackern bei jedem Netzwerkzyklus verhindert.
+-- Die GUI wird nur bei sichtbaren Änderungen neu gezeichnet.
 local function zeichneClientStatus(verbindungsStatus, detailText)
   local sichtbarerStatus = tostring(verbindungsStatus or "")
   local sichtbarerText = tostring(detailText or "")
   local sichtbareMeldung = tostring(guiMessage or "")
   local signature = sichtbarerStatus .. "|" .. sichtbarerText .. "|" .. sichtbareMeldung
-
-  if signature == lastGuiSignature then
-    return
-  end
+  if signature == lastGuiSignature then return end
   lastGuiSignature = signature
 
   gpu.setBackground(0x0C0F12)
@@ -142,7 +157,6 @@ local function zeichneClientStatus(verbindungsStatus, detailText)
 
   drawButton(2, 14, 24, 2, "[ BACKUP REACTOR ]", 0x1A2332, 0xECF0F1)
   drawButton(28, 14, 24, 2, "[ RESTORE REACTOR ]", 0x1A2332, 0xECF0F1)
-
   gpu.setBackground(0x0C0F12)
 end
 
@@ -181,63 +195,42 @@ end
 
 local function setAllRods(level)
   level = math.max(0, math.min(100, tonumber(level) or 0))
-  if reactor.setAllControlRodLevels then
-    return pcall(reactor.setAllControlRodLevels, level)
-  end
-  if reactor.setAllControlRodInsertion then
-    return pcall(reactor.setAllControlRodInsertion, level)
-  end
+  if reactor.setAllControlRodLevels then return pcall(reactor.setAllControlRodLevels, level) end
+  if reactor.setAllControlRodInsertion then return pcall(reactor.setAllControlRodInsertion, level) end
   return false
 end
 
 local function setRod(index, level)
   level = math.max(0, math.min(100, tonumber(level) or 0))
-  if reactor.setControlRodLevel then
-    return pcall(reactor.setControlRodLevel, index, level)
-  end
-  if reactor.setControlRodInsertion then
-    return pcall(reactor.setControlRodInsertion, index, level)
-  end
+  if reactor.setControlRodLevel then return pcall(reactor.setControlRodLevel, index, level) end
+  if reactor.setControlRodInsertion then return pcall(reactor.setControlRodInsertion, index, level) end
   return false
 end
 
 local function applyCommand(serverBefehl, rodCount)
   if type(serverBefehl) ~= "table" then return false end
   local changed = false
-
   if serverBefehl.befehl == "AN" and reactor.setActive then
-    local ok = pcall(reactor.setActive, true)
-    changed = ok
+    changed = pcall(reactor.setActive, true)
   elseif serverBefehl.befehl == "AUS" and reactor.setActive then
-    local ok = pcall(reactor.setActive, false)
-    changed = ok
+    changed = pcall(reactor.setActive, false)
   elseif serverBefehl.befehl == "RODS" then
-    local level = serverBefehl.rods
-    if level == nil then level = serverBefehl.value end
-    if level ~= nil then
-      local ok = setAllRods(level)
-      changed = ok
-    end
+    local level = serverBefehl.rods or serverBefehl.value
+    if level ~= nil then changed = setAllRods(level) end
   elseif serverBefehl.befehl == "RODS_UP" then
-    local level = getRodLevel(0) - 5
-    changed = setAllRods(level)
+    changed = setAllRods(getRodLevel(0) - 5)
   elseif serverBefehl.befehl == "RODS_DOWN" then
-    local level = getRodLevel(0) + 5
-    changed = setAllRods(level)
+    changed = setAllRods(getRodLevel(0) + 5)
   end
 
   if type(serverBefehl.rodLevels) == "table" then
     for i = 0, rodCount - 1 do
       local level = serverBefehl.rodLevels[i]
-      if level ~= nil then
-        setRod(i, level)
-        changed = true
-      end
+      if level ~= nil then setRod(i, level); changed = true end
     end
   elseif serverBefehl.rods ~= nil and serverBefehl.befehl ~= "RODS" then
     changed = setAllRods(serverBefehl.rods) or changed
   end
-
   return changed
 end
 
@@ -248,14 +241,12 @@ while true do
   local energieMax = getNumber(reactor, "getEnergyStoredMax", 10000000)
   if energieMax <= 0 then energieMax = 10000000 end
   local prozent = math.max(0, math.min(100, (energieAktuell / energieMax) * 100))
-
   local aktuelleStaebe = math.floor(getRodLevel(0))
   local rodCount = getRodCount()
   local fuelAmt = math.floor(getNumber(reactor, "getFuelAmount", 0))
   local wasteAmt = math.floor(getNumber(reactor, "getWasteAmount", 0))
   local maxFuel = getNumber(reactor, "getFuelAmountMax", 1000)
   if maxFuel <= 0 then maxFuel = 1000 end
-
   local fuelPct = math.max(0, math.min(100, (fuelAmt / maxFuel) * 100))
   local wastePct = math.max(0, math.min(100, (wasteAmt / maxFuel) * 100))
 
@@ -279,9 +270,7 @@ while true do
     turbineDampf = 0
   }
 
-  for i = 0, rodCount - 1 do
-    daten.rodLevels[i] = math.floor(getRodLevel(i))
-  end
+  for i = 0, rodCount - 1 do daten.rodLevels[i] = math.floor(getRodLevel(i)) end
 
   if component.isAvailable("br_turbine") then
     local turbine = component.getPrimary and component.getPrimary("br_turbine") or component.br_turbine
@@ -311,11 +300,11 @@ while true do
       if touchY >= 14 and touchY <= 15 then
         if touchX >= 2 and touchX <= 25 then
           floppyCommand("backup")
+          zeichneClientStatus("ONLINE", "Backup wird ausgeführt...")
         elseif touchX >= 28 and touchX <= 52 then
           floppyCommand("restore")
+          zeichneClientStatus("ONLINE", "Restore wird ausgeführt...")
         end
-        -- Nach einer Touch-Aktion wird nur bei geänderter Meldung neu gezeichnet.
-        zeichneClientStatus("ONLINE", "Floppy-Aktion ausgeführt")
       end
     end
   end
@@ -325,21 +314,14 @@ while true do
     local success, serverBefehl = pcall(serialization.unserialize, tostring(antwort))
     if success and type(serverBefehl) == "table" then
       local changed = applyCommand(serverBefehl, rodCount)
-      if changed then
-        guiMessage = "Serverbefehl ausgeführt"
-      end
+      if changed then guiMessage = "Serverbefehl ausgeführt" end
     end
-
     zeichneClientStatus("ONLINE", string.format("Server aktiv | %d Staebe | %d RF/t", rodCount, daten.rfProTick))
-    if not getBool(reactor, "getActive", false) then
-      setzeSignalAufAllenSeiten(FARBE_WEISS, 0)
-    end
+    if not getBool(reactor, "getActive", false) then setzeSignalAufAllenSeiten(FARBE_WEISS, 0) end
   else
     misses = misses + 1
     if misses >= 2 then
-      if reactor.setActive and getBool(reactor, "getActive", false) then
-        pcall(reactor.setActive, false)
-      end
+      if reactor.setActive and getBool(reactor, "getActive", false) then pcall(reactor.setActive, false) end
       setLampOutput(REDSTONE_OFF)
       setzeSignalAufAllenSeiten(FARBE_ROT, 15)
       zeichneClientStatus("OFFLINE", "Watchdog-Timeout! Notabschaltung aktiv.")
