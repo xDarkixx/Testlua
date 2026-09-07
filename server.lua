@@ -70,7 +70,6 @@ for _,path in ipairs(apiPaths) do
  end
 end
 
--- SGCraft hardware adapter. The GUI stays unchanged.
 local function methodMap(address)
  local result={}; local ok,m=pcall(component.methods,address)
  if ok and type(m)=="table" then for name,value in pairs(m) do if value then result[name]=true end end end
@@ -244,12 +243,15 @@ local function packet(localAddress,senderAddress,port,distance,message)
   autoControl(); sendStatus(senderAddress)
  elseif port==PORT_SERVER then
   if message.cmd=="GET_DATA" then refreshSG(); sendStatus(senderAddress)
-  elseif message.cmd=="DIAL" or message.cmd=="DIAL_GATE" then dialGate(message.address or message.addr or message.val)
-  elseif message.cmd=="DISCONNECT" then disconnectGate()
-  elseif message.cmd=="IRIS_OPEN" then iris(true)
-  elseif message.cmd=="IRIS_CLOSE" then iris(false)
+  elseif message.cmd=="DIAL" or message.cmd=="DIAL_GATE" or message.cmd=="SG_DIAL" then dialGate(message.address or message.addr or message.val)
+  elseif message.cmd=="DISCONNECT" or message.cmd=="SG_DISCONNECT" then disconnectGate()
+  elseif message.cmd=="IRIS_OPEN" or message.cmd=="SG_IRIS_OPEN" then iris(true)
+  elseif message.cmd=="IRIS_CLOSE" or message.cmd=="SG_IRIS_CLOSE" then iris(false)
   elseif message.cmd=="IRIS" then iris(message.open==true or message.value==true or message.val==true)
   elseif message.cmd=="RODS" then setRods(message.rods or message.value)
+  elseif message.cmd=="RODS_UP" then changeRods(ROD_STEP)
+  elseif message.cmd=="RODS_DOWN" then changeRods(-ROD_STEP)
+  elseif message.cmd=="AUTO" then modus="AUTO"; setLog("REAKTOR: AUTO")
   elseif message.cmd=="AN" or message.cmd=="START" then modus="MANUELL_AN"; sendReactor("AN",true); setLog("REAKTOR: START")
   elseif message.cmd=="AUS" or message.cmd=="STOP" then modus="MANUELL_AUS"; sendReactor("AUS",true); setLog("REAKTOR: STOPP")
   elseif message.cmd=="SET_SAFETY" then
