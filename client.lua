@@ -58,7 +58,7 @@ local function zeichneClientStatus(verbindungsStatus, detailText)
   gpu.setBackground(0x0C0F12)
   gpu.setForeground(0x56B3FA)
   print("============================================================")
-  print("             REAKTOR-NETZWERK CLIENT v10                    ")
+  print("             REAKTOR-NETZWERK CLIENT v11                    ")
   print("============================================================")
   io.write(" Status: ")
   if verbindungsStatus == "ONLINE" then
@@ -121,24 +121,64 @@ end
 
 local function setAllRods(level)
   level = math.max(0, math.min(100, tonumber(level) or 0))
-  if reactor.setAllControlRodInsertion then
-    return pcall(reactor.setAllControlRodInsertion, level)
-  end
   if reactor.setAllControlRodLevels then
     return pcall(reactor.setAllControlRodLevels, level)
+  end
+  if reactor.setAllControlRodInsertion then
+    return pcall(reactor.setAllControlRodInsertion, level)
   end
   return false
 end
 
 local function setRod(index, level)
   level = math.max(0, math.min(100, tonumber(level) or 0))
-  if reactor.setControlRodInsertion then
-    return pcall(reactor.setControlRodInsertion, index, level)
-  end
   if reactor.setControlRodLevel then
     return pcall(reactor.setControlRodLevel, index, level)
   end
+  if reactor.setControlRodInsertion then
+    return pcall(reactor.setControlRodInsertion, index, level)
+  end
   return false
+end
+
+local function applyCommand(serverBefehl, rodCount)
+  if type(serverBefehl) ~= "table" then return false end
+  local changed = false
+
+  if serverBefehl.befehl == "AN" and reactor.setActive then
+    local ok = pcall(reactor.setActive, true)
+    changed = ok
+  elseif serverBefehl.befehl == "AUS" and reactor.setActive then
+    local ok = pcall(reactor.setActive, false)
+    changed = ok
+  elseif serverBefehl.befehl == "RODS" then
+    local level = serverBefehl.rods
+    if level == nil then level = serverBefehl.value end
+    if level ~= nil then
+      local ok = setAllRods(level)
+      changed = ok
+    end
+  elseif serverBefehl.befehl == "RODS_UP" then
+    local level = getRodLevel(0) - 5
+    changed = setAllRods(level)
+  elseif serverBefehl.befehl == "RODS_DOWN" then
+    local level = getRodLevel(0) + 5
+    changed = setAllRods(level)
+  end
+
+  if type(serverBefehl.rodLevels) == "table" then
+    for i = 0, rodCount - 1 do
+      local level = serverBefehl.rodLevels[i]
+      if level ~= nil then
+        setRod(i, level)
+        changed = true
+      end
+    end
+  elseif serverBefehl.rods ~= nil and serverBefehl.befehl ~= "RODS" then
+    changed = setAllRods(serverBefehl.rods) or changed
+  end
+
+  return changed
 end
 
 zeichneClientStatus("SUCHEND", "Sende erste Datenpakete ins Netzwerk...")
@@ -200,15 +240,14 @@ while true do
   modem.broadcast(PORT, serialization.serialize(daten))
 
   local antwort = nil
-  local touchX, touchY
   for _ = 1, SERVER_TIMEOUT do
-    local eventTyp, _, sender, port, y, message = event.pull(1.0)
-    if eventTyp == "modem_message" and port == PORT and message and tostring(message) ~= "" then
-      antwort = message
+    local eventTyp, screenOrLocal, senderOrX, portOrY, distanceOrButton, messageOrUser = event.pull(1.0)
+    if eventTyp == "modem_message" and tonumber(portOrY) == PORT and messageOrUser and tostring(messageOrUser) ~= "" then
+      antwort = messageOrUser
       break
     elseif eventTyp == "touch" then
-      touchX = tonumber(sender) or 0
-      touchY = tonumber(port) or 0
+      local touchX = tonumber(senderOrX) or 0
+      local touchY = tonumber(portOrY) or 0
       if touchY >= 13 and touchY <= 15 then
         if touchX >= 2 and touchX <= 25 then
           floppyCommand("backup")
@@ -224,19 +263,9 @@ while true do
     misses = 0
     local success, serverBefehl = pcall(serialization.unserialize, tostring(antwort))
     if success and type(serverBefehl) == "table" then
-      if serverBefehl.befehl == "AN" and reactor.setActive then
-        pcall(reactor.setActive, true)
-      elseif serverBefehl.befehl == "AUS" and reactor.setActive then
-        pcall(reactor.setActive, false)
-      end
-
-      if type(serverBefehl.rodLevels) == "table" then
-        for i = 0, rodCount - 1 do
-          local level = serverBefehl.rodLevels[i]
-          if level ~= nil then setRod(i, level) end
-        end
-      elseif serverBefehl.rods ~= nil then
-        setAllRods(serverBefehl.rods)
+      local changed = applyCommand(serverBefehl, rodCount)
+      if changed then
+        guiMessage = "Serverbefehl ausgeführt"
       end
     end
 
