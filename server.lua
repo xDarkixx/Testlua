@@ -55,6 +55,21 @@ local function loadConfig()
 end
 loadConfig()
 
+-- Load the local API without changing the GUI. The repo file is expected at /home/SGCraftAPI.lua.
+local SGCraftAPI=nil
+local apiPath=nil
+local apiPaths={}
+local cwd=shell.getWorkingDirectory and shell.getWorkingDirectory() or "/home"
+apiPaths[#apiPaths+1]=filesystem.concat(cwd,"SGCraftAPI.lua")
+apiPaths[#apiPaths+1]="/home/SGCraftAPI.lua"
+apiPaths[#apiPaths+1]="SGCraftAPI.lua"
+for _,path in ipairs(apiPaths) do
+ if filesystem.exists(path) then
+  local ok,mod=pcall(dofile,path)
+  if ok and type(mod)=="table" then SGCraftAPI=mod; apiPath=path; break end
+ end
+end
+
 -- SGCraft hardware adapter. The GUI stays unchanged.
 local function methodMap(address)
  local result={}; local ok,m=pcall(component.methods,address)
@@ -62,9 +77,13 @@ local function methodMap(address)
  return result
 end
 local function findStargate()
- if not component.isAvailable("stargate") then return nil end
- local ok,p=pcall(component.getPrimary,"stargate")
- if ok and p then
+ if SGCraftAPI then
+  local found,err=SGCraftAPI.find()
+  if found then return found end
+  if err then setLog("SG API: "..tostring(err)) end
+ end
+ local okPrimary,p=pcall(component.getPrimary,"stargate")
+ if okPrimary and p then
   local address=p.address or p
   local okProxy,proxy=pcall(component.proxy,address)
   if not okProxy then proxy=nil end
@@ -82,7 +101,7 @@ end
 local function ensureSG()
  if not sg.address then
   local found=findStargate()
-  if found then sg.address=found.address; sg.proxy=found.proxy; sg.methods=found.methods end
+  if found then sg.address=found.address; sg.proxy=found.proxy; sg.methods=found.methods or methodMap(found.address) end
  end
  return sg.address~=nil
 end
@@ -99,22 +118,14 @@ local function invoke(method,...)
  if not ensureSG() then return false,nil,"NO STARGATE INTERFACE" end
  local args={...}
  local ok,a,b,c=pcall(function() return component.invoke(sg.address,method,unpackFn(args,1,#args)) end)
- if ok and a~=nil then return true,a,b,c end
- if not ok then
-  -- Retry through the proxy; this also handles interfaces whose direct invoke rejects a call.
-  if sg.proxy and type(sg.proxy[method])=="function" then
-   local pok,pa,pb,pc=pcall(function() return sg.proxy[method](unpackFn(args,1,#args)) end)
-   if pok and pa~=nil then return true,pa,pb,pc end
-   return false,nil,tostring(pa)
-  end
-  return false,nil,tostring(a)
- end
+ -- pcall success means the component method executed successfully even when it returns nil.
+ if ok then return true,a,b,c end
  if sg.proxy and type(sg.proxy[method])=="function" then
   local pok,pa,pb,pc=pcall(function() return sg.proxy[method](unpackFn(args,1,#args)) end)
-  if pok and pa~=nil then return true,pa,pb,pc end
-  if not pok then return false,nil,tostring(pa) end
+  if pok then return true,pa,pb,pc end
+  return false,nil,tostring(pa)
  end
- return false,nil,tostring(b or ("METHOD NOT AVAILABLE: "..method))
+ return false,nil,tostring(a or ("API CALL FAILED: "..method))
 end
 local function updateIrisCapability()
  if not ensureSG() then sg.irisAvailable=false; return end
@@ -132,16 +143,15 @@ local function refreshSG()
  if okA then sg.localAddress=tostring(localAddress or "N/A") else sg.localAddress="N/A" end
 end
 local function sgAction(method,arg)
- if not ensureSG() then setLog("SG: KEIN STARGATE INTERFACE"); return false end
+ if not ensureSG() then setLog(apiPath and ("SG API GELADEN, ABER KEIN INTERFACE: "..apiPath) or "SG API NICHT GELADEN / KEIN STARGATE INTERFACE"); return false end
  local ok,a,b
- -- IMPORTANT: zero-argument SGCraft methods must receive zero arguments.
  if arg==nil then ok,a,b=invoke(method) else ok,a,b=invoke(method,arg) end
  if not ok then setLog("SG: "..method.." FEHLER / "..tostring(b or a)); return false end
  return true
 end
 local function iris(open)
  updateIrisCapability()
- if not sg.irisAvailable then setLog("IRIS NICHT VERFÜGBAR / KEINE SGCraft-Iris-API"); return false end
+ if not sg.irisAvailable then setLog(apiPath and "IRIS NICHT VERFÜGBAR / API GELADEN, ABER KEINE IRIS-METHODEN" or "IRIS NICHT VERFÜGBAR / SGCraftAPI.lua NICHT GELADEN"); return false end
  local method
  if open then method=hasMethod("openIris") and "openIris" or "irisOpen" else method=hasMethod("closeIris") and "closeIris" or "irisClose" end
  if sgAction(method) then
@@ -152,9 +162,11 @@ local function iris(open)
  return false
 end
 local function dialGate(addr)
- addr=tostring(addr or ""):gsub("[^0-9A-Za-z]",""):upper()
- if #addr~=7 and #addr~=9 then setLog("SG: ADRESSE MUSS 7 ODER 9 SYMBOLE HABEN (Bindestriche erlaubt)"); return false end
- if sgAction("dial",addr) then setLog("SG: WÄHLE "..addr); return true end
+ local normalized=addr
+ if SGCraftAPI and SGCraftAPI.normalizeAddress then normalized=SGCraftAPI.normalizeAddress(addr) end
+ normalized=tostring(normalized or ""):gsub("[^0-9A-Za-z]",""):upper()
+ if #normalized~=7 and #normalized~=9 then setLog("SG: ADRESSE MUSS 7 ODER 9 SYMBOLE HABEN (Bindestriche erlaubt)"); return false end
+ if sgAction("dial",normalized) then setLog("SG: WÄHLE "..normalized); return true end
  return false
 end
 local function disconnectGate() if sgAction("disconnect") then setLog("SG: VERBINDUNG GETRENNT") end end
