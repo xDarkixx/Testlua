@@ -20,6 +20,7 @@ local PORT = 101
 local SERVER_TIMEOUT = 3
 local misses = 0
 local guiMessage = "Bereit"
+local lastGuiSignature = nil
 
 -- Redstone-Lampe: Seite ist egal.
 -- Die Lampe kann an FRONT, BACK, LEFT, RIGHT, TOP oder BOTTOM angeschlossen werden.
@@ -58,6 +59,7 @@ if modem.setStrength then modem.setStrength(400) end
 
 gpu.setResolution(60, 16)
 gpu.setBackground(0x0C0F12)
+gpu.setForeground(0xECF0F1)
 term.clear()
 
 local FARBE_WEISS = 0
@@ -86,41 +88,62 @@ local function floppyCommand(command)
   end
 end
 
+-- Die GUI wird nur neu gezeichnet, wenn sich der sichtbare Zustand wirklich geändert hat.
+-- Dadurch wird das typische term.clear()-Flackern bei jedem Netzwerkzyklus verhindert.
 local function zeichneClientStatus(verbindungsStatus, detailText)
-  term.clear()
+  local sichtbarerStatus = tostring(verbindungsStatus or "")
+  local sichtbarerText = tostring(detailText or "")
+  local sichtbareMeldung = tostring(guiMessage or "")
+  local signature = sichtbarerStatus .. "|" .. sichtbarerText .. "|" .. sichtbareMeldung
+
+  if signature == lastGuiSignature then
+    return
+  end
+  lastGuiSignature = signature
+
   gpu.setBackground(0x0C0F12)
+  gpu.setForeground(0xECF0F1)
+  gpu.fill(1, 1, 60, 16, " ")
+
   gpu.setForeground(0x56B3FA)
-  print("============================================================")
-  print("             REAKTOR-NETZWERK CLIENT v11                    ")
-  print("============================================================")
-  io.write(" Status: ")
+  gpu.set(1, 1, "============================================================")
+  gpu.set(1, 2, "             REAKTOR-NETZWERK CLIENT v11                    ")
+  gpu.set(1, 3, "============================================================")
+
+  gpu.setForeground(0xECF0F1)
+  gpu.set(2, 5, "Status:")
   if verbindungsStatus == "ONLINE" then
     gpu.setForeground(0x2ECC71)
-    print("[ VERBUNDEN ]")
+    gpu.set(10, 5, "[ VERBUNDEN ]")
     setLampOutput(REDSTONE_ON)
     setzeSignalAufAllenSeiten(FARBE_WEISS, 15)
     setzeSignalAufAllenSeiten(FARBE_ROT, 0)
   elseif verbindungsStatus == "SUCHEND" then
     gpu.setForeground(0xF1C40F)
-    print("[ WARTE AUF SERVER... ]")
+    gpu.set(10, 5, "[ WARTE AUF SERVER... ]")
     setLampOutput(REDSTONE_OFF)
     setzeSignalAufAllenSeiten(FARBE_WEISS, 0)
     setzeSignalAufAllenSeiten(FARBE_ROT, 15)
   else
     gpu.setForeground(0xE74C3C)
-    print("[ OFFLINE / DISCONNECT ]")
+    gpu.set(10, 5, "[ OFFLINE / DISCONNECT ]")
     setLampOutput(REDSTONE_OFF)
     setzeSignalAufAllenSeiten(FARBE_WEISS, 0)
     setzeSignalAufAllenSeiten(FARBE_ROT, 15)
   end
+
   gpu.setForeground(0xECF0F1)
-  print(" Info: " .. (detailText or "Initialisiere..."))
-  print(" Lampe: Redstone-Card | Seite: " .. REDSTONE_LAMP_SIDE)
-  print("============================================================")
+  gpu.set(2, 7, "Info: " .. string.sub(sichtbarerText, 1, 52))
+  gpu.set(2, 9, "Lampe: Redstone-Card | Seite: " .. REDSTONE_LAMP_SIDE)
+  gpu.setForeground(0x00E5FF)
+  gpu.set(2, 11, string.sub(sichtbareMeldung, 1, 56))
+  gpu.setForeground(0x56B3FA)
+  gpu.set(1, 12, "------------------------------------------------------------")
+
   drawButton(2, 14, 24, 2, "[ BACKUP REACTOR ]", 0x1A2332, 0xECF0F1)
   drawButton(28, 14, 24, 2, "[ RESTORE REACTOR ]", 0x1A2332, 0xECF0F1)
-  gpu.setForeground(0x00E5FF)
-  gpu.set(2, 13, string.sub(guiMessage, 1, 56))
+
+  gpu.setBackground(0x0C0F12)
 end
 
 local function getNumber(obj, method, fallback)
@@ -291,6 +314,7 @@ while true do
         elseif touchX >= 28 and touchX <= 52 then
           floppyCommand("restore")
         end
+        -- Nach einer Touch-Aktion wird nur bei geänderter Meldung neu gezeichnet.
         zeichneClientStatus("ONLINE", "Floppy-Aktion ausgeführt")
       end
     end
