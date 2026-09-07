@@ -1,7 +1,7 @@
 -- Testlua Floppy Backup Manager
 -- OpenComputers 1.7.10
--- Eine eigene Floppy pro System:
--- TESTLUA-REACTOR, TESTLUA-STARGATE, TESTLUA-SERVER, TESTLUA-CLIENT
+-- Eigene Floppy pro System:
+-- TESTLUA-REACTOR, TESTLUA-STARGATE, TESTLUA-SERVER, TESTLUA-CLIENT, TESTLUA-SYSTEM
 
 local component = require("component")
 local serialization = require("serialization")
@@ -17,9 +17,7 @@ local ROLE_LABELS = {
   SYSTEM = "TESTLUA-SYSTEM"
 }
 
-local function has(name)
-  return component.isAvailable(name)
-end
+local function has(name) return component.isAvailable(name) end
 
 local function detectRole()
   if has("br_reactor") then return "REACTOR" end
@@ -31,42 +29,65 @@ end
 local ROLE = detectRole()
 local LABEL = ROLE_LABELS[ROLE]
 
-local function isWritable(proxy)
-  return proxy and proxy.isReadOnly and not proxy.isReadOnly()
+local function getProxy(address)
+  local ok, proxy = pcall(component.proxy, address)
+  if ok then return proxy end
+  return nil
 end
 
--- Niemals automatisch die normale Festplatte nehmen.
--- Eine bereits passend beschriftete Floppy wird bevorzugt.
+local function isWritable(proxy)
+  if not proxy then return false end
+  if not proxy.isReadOnly then return true end
+  local ok, ro = pcall(proxy.isReadOnly)
+  return ok and not ro
+end
+
+local function diskSize(proxy)
+  if not proxy or not proxy.spaceTotal then return 0 end
+  local ok, total = pcall(proxy.spaceTotal)
+  return ok and tonumber(total) or 0
+end
+
+-- Findet die tatsächlich eingelegte beschreibbare Floppy.
+-- Wichtig: Eine Floppy darf auch PRIMARY sein. Nur große normale Festplatten
+-- werden ausgeschlossen. Eine passende TESTLUA-Floppy hat immer Vorrang.
 local function findDisk()
-  if not component.isAvailable("filesystem") then return nil end
+  if not has("filesystem") then return nil end
 
-  local primary = component.getPrimary("filesystem")
-  local list = component.list("filesystem")
-
-  -- 1. Explizit passend beschriftete Floppy suchen.
-  for address in list do
-    if not primary or address ~= primary.address then
-      local proxy = component.proxy(address)
-      if isWritable(proxy) then
-        local label = proxy.getLabel and proxy.getLabel() or ""
-        if label == LABEL then return proxy end
+  local candidates = {}
+  for address in component.list("filesystem") do
+    local proxy = getProxy(address)
+    if isWritable(proxy) then
+      local label = ""
+      if proxy.getLabel then
+        local ok, value = pcall(proxy.getLabel)
+        if ok then label = tostring(value or "") end
       end
+      local total = diskSize(proxy)
+      candidates[#candidates + 1] = {address=address, proxy=proxy, label=label, total=total}
     end
   end
 
-  -- 2. Unbeschriftete kleine Wechselmedien erkennen.
-  -- Die primäre Festplatte wird grundsätzlich ausgeschlossen.
-  for address in component.list("filesystem") do
-    if not primary or address ~= primary.address then
-      local proxy = component.proxy(address)
-      if isWritable(proxy) then
-        local label = proxy.getLabel and proxy.getLabel() or ""
-        local total = proxy.spaceTotal and proxy.spaceTotal() or 0
-        if label == "" and total > 0 and total <= 2000000 then
-          if proxy.setLabel then pcall(proxy.setLabel, LABEL) end
-          return proxy
-        end
-      end
+  -- 1. Bereits korrekt beschriftete Floppy immer bevorzugen.
+  for _, c in ipairs(candidates) do
+    if c.label == LABEL then return c.proxy end
+  end
+
+  -- 2. Kleine Wechselmedien als neue Floppy erkennen.
+  -- 2 MB ist absichtlich etwas großzügiger als eine 1.44-MB-Floppy.
+  for _, c in ipairs(candidates) do
+    if c.label == "" and c.total > 0 and c.total <= 2000000 then
+      if c.proxy.setLabel then pcall(c.proxy.setLabel, LABEL) end
+      return c.proxy
+    end
+  end
+
+  -- 3. Falls die Floppy bereits ein anderes Label trägt, aber klein ist,
+  --    darf sie für dieses System verwendet und korrekt beschriftet werden.
+  for _, c in ipairs(candidates) do
+    if c.total > 0 and c.total <= 2000000 then
+      if c.proxy.setLabel then pcall(c.proxy.setLabel, LABEL) end
+      return c.proxy
     end
   end
 
@@ -82,15 +103,15 @@ local function readLocal(path)
 end
 
 local function readDisk(proxy, path)
-  local f = proxy.open(path, "r")
-  if not f then return nil end
+  local ok, handle = pcall(proxy.open, path, "r")
+  if not ok or not handle then return nil end
   local chunks = {}
   while true do
-    local chunk = proxy.read(f, 4096)
-    if not chunk or chunk == "" then break end
+    local okRead, chunk = pcall(proxy.read, handle, 4096)
+    if not okRead or not chunk or chunk == "" then break end
     chunks[#chunks + 1] = chunk
   end
-  pcall(proxy.close, f)
+  pcall(proxy.close, handle)
   return table.concat(chunks)
 end
 
@@ -99,17 +120,19 @@ local function writeDisk(proxy, path, data)
   if parent and parent ~= "/" and not proxy.exists(parent) then
     pcall(proxy.makeDirectory, parent)
   end
-  local f = proxy.open(path, "w")
-  if not f then return false end
+
+  local okOpen, handle = pcall(proxy.open, path, "w")
+  if not okOpen or not handle then return false end
+
   local ok = true
   local pos = 1
   while pos <= #data do
-    local chunk = data:sub(pos, pos + 4095)
-    local wrote = pcall(proxy.write, f, chunk)
-    if not wrote then ok = false; break end
+    local chunk = data:sub(pos, math.min(pos + 4095, #data))
+    local okWrite = pcall(proxy.write, handle, chunk)
+    if not okWrite then ok = false; break end
     pos = pos + #chunk
   end
-  pcall(proxy.close, f)
+  pcall(proxy.close, handle)
   return ok
 end
 
@@ -128,14 +151,14 @@ end
 local function backup()
   local disk = findDisk()
   if not disk then
-    return false, "Keine passende Floppy gefunden. Bitte eine eigene Floppy einlegen."
+    return false, "Keine beschreibbare Floppy gefunden. Bitte eine Floppy einlegen."
   end
 
   if disk.setLabel then pcall(disk.setLabel, LABEL) end
   if not disk.exists("/testlua") then pcall(disk.makeDirectory, "/testlua") end
 
   local manifest = {
-    version = 2,
+    version = 3,
     role = ROLE,
     label = LABEL,
     files = {},
@@ -143,21 +166,26 @@ local function backup()
   }
 
   local used = 0
+  local failed = 0
   for _, name in ipairs(getBackupFiles()) do
     local data = readLocal(fs.concat(currentDir, name))
     if data then
       local target = fs.concat("/testlua", name)
-      local ok = writeDisk(disk, target, data)
-      if ok then
+      if writeDisk(disk, target, data) then
         manifest.files[name] = #data
         used = used + #data
+      else
+        failed = failed + 1
       end
     end
   end
 
-  local raw = serialization.serialize(manifest)
-  if not writeDisk(disk, "/testlua/manifest.dat", raw) then
-    return false, "Backup konnte nicht vollständig geschrieben werden."
+  if not writeDisk(disk, "/testlua/manifest.dat", serialization.serialize(manifest)) then
+    return false, "Backup konnte nicht vollständig geschrieben werden (kein Speicherplatz oder Floppy schreibgeschützt)."
+  end
+
+  if failed > 0 then
+    return false, "Backup teilweise fehlgeschlagen: " .. tostring(failed) .. " Datei(en) konnten nicht geschrieben werden."
   end
 
   return true, "Backup " .. ROLE .. " gespeichert auf " .. LABEL .. " (" .. tostring(used) .. " Bytes)."
@@ -166,7 +194,7 @@ end
 local function restore()
   local disk = findDisk()
   if not disk then
-    return false, "Keine passende Floppy für " .. ROLE .. " gefunden."
+    return false, "Keine beschreibbare Floppy für " .. ROLE .. " gefunden."
   end
 
   local raw = readDisk(disk, "/testlua/manifest.dat")
@@ -174,24 +202,27 @@ local function restore()
 
   local good, manifest = pcall(serialization.unserialize, raw)
   if not good or type(manifest) ~= "table" then
-    return false, "Ungültiges Backup."
+    return false, "Ungültiges Backup." 
   end
   if manifest.label ~= LABEL or manifest.role ~= ROLE then
     return false, "Falsche Floppy: erwartet " .. LABEL .. "."
   end
 
+  local restored = 0
   for name in pairs(manifest.files or {}) do
     local content = readDisk(disk, fs.concat("/testlua", name))
     if content then
-      local wf = io.open(fs.concat(currentDir, name), "w")
+      local path = fs.concat(currentDir, name)
+      local wf = io.open(path, "w")
       if wf then
         wf:write(content)
         wf:close()
+        restored = restored + 1
       end
     end
   end
 
-  return true, "Backup " .. ROLE .. " von " .. LABEL .. " wiederhergestellt."
+  return true, "Backup " .. ROLE .. " von " .. LABEL .. " wiederhergestellt (" .. tostring(restored) .. " Dateien)."
 end
 
 local function status()
@@ -211,14 +242,17 @@ local function status()
 end
 
 local args = shell.parse(...)
-local cmd = tostring(args[1] or "backup")
+local cmd = tostring(args[1] or "backup"):lower()
 
 if cmd == "restore" then
   local ok, msg = restore()
   print(msg)
+  return ok
 elseif cmd == "status" then
   status()
+  return true
 else
   local ok, msg = backup()
   print(msg)
+  return ok
 end
